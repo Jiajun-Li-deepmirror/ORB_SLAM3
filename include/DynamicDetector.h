@@ -19,6 +19,11 @@
 #include <opencv2/dnn.hpp>
 #include <string>
 #include <vector>
+#include <memory>
+
+#ifdef WITH_ORT_CUDA
+#include <onnxruntime_cxx_api.h>
+#endif
 
 namespace ORB_SLAM3
 {
@@ -39,9 +44,14 @@ public:
     // dynamicClassIds: COCO class ids treated as potentially dynamic (0 = person).
     // depthEpsilon: predefined distance (metres) used in the depth-threshold rule,
     // sized to the typical depth extent of the targeted dynamic objects.
+    // useCuda: run YOLO inference through ONNX Runtime's CUDA execution provider instead of
+    // OpenCV's CPU-only DNN module. Only has an effect if built WITH_ORT_CUDA; silently falls
+    // back to the OpenCV CPU path otherwise so callers don't need an #ifdef at the call site.
     DynamicDetector(const std::string &onnxModelPath, float confThreshold = 0.35f,
                      float nmsThreshold = 0.45f, float depthEpsilon = 0.4f,
-                     const std::vector<int> &dynamicClassIds = std::vector<int>{0});
+                     const std::vector<int> &dynamicClassIds = std::vector<int>{0},
+                     bool useCuda = false);
+    ~DynamicDetector();
 
     // imRGB: colour or grayscale image, any size. imDepth: CV_32F depth in metres,
     // 0 = invalid/unknown, same size as imRGB. Returns a CV_8U mask the same size
@@ -55,10 +65,15 @@ public:
 
 private:
     std::vector<Detection> runYolo(const cv::Mat &imRGB);
+    // Runs one forward pass and returns the raw [numAnchors x dims] output as a CV_32F cv::Mat,
+    // regardless of which backend actually executed it -- runYolo()'s postprocessing (objectness
+    // * class score, box decode, NMS) is identical either way.
+    cv::Mat forward(const cv::Mat &blob);
     void applyDepthThresholdMask(const cv::Mat &imDepth, const cv::Rect &box, cv::Mat &mask) const;
 
     cv::dnn::Net mNet;
     bool mbEnabled;
+    bool mbUseCuda;
     float mConfThreshold;
     float mNmsThreshold;
     float mDepthEpsilon;
@@ -66,6 +81,13 @@ private:
     static const int INPUT_SIZE = 640;
 
     std::vector<Detection> mvLastDetections;
+
+#ifdef WITH_ORT_CUDA
+    std::unique_ptr<Ort::Env> mpOrtEnv;
+    std::unique_ptr<Ort::Session> mpOrtSession;
+    std::string mOrtInputName;
+    std::string mOrtOutputName;
+#endif
 };
 
 } // namespace ORB_SLAM3

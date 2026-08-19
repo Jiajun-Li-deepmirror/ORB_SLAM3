@@ -3,14 +3,15 @@
 #include <iostream>
 #include <algorithm>
 #include <cmath>
+#include <array>
 
 namespace ORB_SLAM3
 {
 
 DynamicDetector::DynamicDetector(const std::string &onnxModelPath, float confThreshold,
                                   float nmsThreshold, float depthEpsilon,
-                                  const std::vector<int> &dynamicClassIds)
-    : mbEnabled(false), mConfThreshold(confThreshold), mNmsThreshold(nmsThreshold),
+                                  const std::vector<int> &dynamicClassIds, bool useCuda)
+    : mbEnabled(false), mbUseCuda(false), mConfThreshold(confThreshold), mNmsThreshold(nmsThreshold),
       mDepthEpsilon(depthEpsilon), mDynamicClassIds(dynamicClassIds)
 {
     if(onnxModelPath.empty())
@@ -18,6 +19,44 @@ DynamicDetector::DynamicDetector(const std::string &onnxModelPath, float confThr
         std::cout << "[DynamicDetector] No ONNX model path given, dynamic-object masking is disabled." << std::endl;
         return;
     }
+
+#ifdef WITH_ORT_CUDA
+    if(useCuda)
+    {
+        try
+        {
+            mpOrtEnv.reset(new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "DynamicDetector"));
+            Ort::SessionOptions options;
+            OrtCUDAProviderOptions cudaOptions{};
+            options.AppendExecutionProvider_CUDA(cudaOptions);
+            options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+            mpOrtSession.reset(new Ort::Session(*mpOrtEnv, onnxModelPath.c_str(), options));
+
+            Ort::AllocatorWithDefaultOptions allocator;
+            mOrtInputName = mpOrtSession->GetInputNameAllocated(0, allocator).get();
+            mOrtOutputName = mpOrtSession->GetOutputNameAllocated(0, allocator).get();
+
+            mbEnabled = true;
+            mbUseCuda = true;
+            std::cout << "[DynamicDetector] Loaded YOLO model from " << onnxModelPath
+                      << " via ONNX Runtime CUDA EP (conf=" << mConfThreshold << ", nms=" << mNmsThreshold
+                      << ", depthEpsilon=" << mDepthEpsilon << "m, "
+                      << mDynamicClassIds.size() << " dynamic class id(s))" << std::endl;
+            return;
+        }
+        catch(const Ort::Exception &e)
+        {
+            std::cerr << "[DynamicDetector] Failed to init ONNX Runtime CUDA EP (" << e.what()
+                      << "), falling back to OpenCV CPU backend." << std::endl;
+            mpOrtSession.reset();
+            mpOrtEnv.reset();
+        }
+    }
+#else
+    if(useCuda)
+        std::cerr << "[DynamicDetector] Built without WITH_ORT_CUDA, ignoring useCuda=true and "
+                      "falling back to OpenCV CPU backend." << std::endl;
+#endif
 
     try
     {
@@ -31,7 +70,7 @@ DynamicDetector::DynamicDetector(const std::string &onnxModelPath, float confThr
         mNet.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
         mbEnabled = true;
         std::cout << "[DynamicDetector] Loaded YOLO model from " << onnxModelPath
-                  << " (conf=" << mConfThreshold << ", nms=" << mNmsThreshold
+                  << " via OpenCV CPU backend (conf=" << mConfThreshold << ", nms=" << mNmsThreshold
                   << ", depthEpsilon=" << mDepthEpsilon << "m, "
                   << mDynamicClassIds.size() << " dynamic class id(s))" << std::endl;
     }
@@ -41,6 +80,8 @@ DynamicDetector::DynamicDetector(const std::string &onnxModelPath, float confThr
         mbEnabled = false;
     }
 }
+
+DynamicDetector::~DynamicDetector() = default;
 
 std::vector<DynamicDetector::Detection> DynamicDetector::runYolo(const cv::Mat &imRGB)
 {
@@ -55,18 +96,16 @@ std::vector<DynamicDetector::Detection> DynamicDetector::runYolo(const cv::Mat &
     // module targets.
     cv::dnn::blobFromImage(imRGB, blob, 1.0/255.0, cv::Size(INPUT_SIZE, INPUT_SIZE),
                             cv::Scalar(), true, false);
-    mNet.setInput(blob);
 
-    cv::Mat output = mNet.forward();
     // Output shape is [1, numAnchors, 5+numClasses] (e.g. [1,25200,85]): each row is already
     // sigmoid-activated and decoded to [cx, cy, w, h, objectness, class0..classN] in pixels of
     // the INPUT_SIZE x INPUT_SIZE input image (this is the pre-2022 YOLOv5 "Detect" head format,
     // chosen instead of YOLOv8's anchor-free head because OpenCV 4.5.4's ONNX importer cannot
     // parse the newer head -- see the AVX/-mno-avx512f-style compatibility notes in this repo's
     // commit history for the general pattern of "old OpenCV, new export" mismatches).
-    const int numAnchors = output.size[1];
-    const int dims = output.size[2];
-    cv::Mat outMat(numAnchors, dims, CV_32F, output.ptr<float>());
+    cv::Mat outMat = forward(blob);
+    const int numAnchors = outMat.rows;
+    const int dims = outMat.cols;
 
     const float scaleX = static_cast<float>(imRGB.cols) / INPUT_SIZE;
     const float scaleY = static_cast<float>(imRGB.rows) / INPUT_SIZE;
@@ -125,6 +164,38 @@ std::vector<DynamicDetector::Detection> DynamicDetector::runYolo(const cv::Mat &
     }
 
     return detections;
+}
+
+cv::Mat DynamicDetector::forward(const cv::Mat &blob)
+{
+#ifdef WITH_ORT_CUDA
+    if(mbUseCuda)
+    {
+        CV_Assert(blob.isContinuous());
+        std::array<int64_t, 4> inputShape{1, 3, INPUT_SIZE, INPUT_SIZE};
+        Ort::MemoryInfo memInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+        Ort::Value inputTensor = Ort::Value::CreateTensor<float>(
+            memInfo, const_cast<float*>(blob.ptr<float>()), blob.total(),
+            inputShape.data(), inputShape.size());
+
+        const char *inputNames[] = {mOrtInputName.c_str()};
+        const char *outputNames[] = {mOrtOutputName.c_str()};
+        auto outputTensors = mpOrtSession->Run(Ort::RunOptions{nullptr}, inputNames, &inputTensor, 1,
+                                                outputNames, 1);
+
+        const Ort::TensorTypeAndShapeInfo shapeInfo = outputTensors.front().GetTensorTypeAndShapeInfo();
+        const std::vector<int64_t> shape = shapeInfo.GetShape(); // [1, numAnchors, dims]
+        const int numAnchors = static_cast<int>(shape[1]);
+        const int dims = static_cast<int>(shape[2]);
+        const float *data = outputTensors.front().GetTensorData<float>();
+        // Copy out: the Ort::Value (and the memory `data` points into) is destroyed together
+        // with outputTensors when this function returns.
+        return cv::Mat(numAnchors, dims, CV_32F, const_cast<float*>(data)).clone();
+    }
+#endif
+    mNet.setInput(blob);
+    cv::Mat output = mNet.forward();
+    return cv::Mat(output.size[1], output.size[2], CV_32F, output.ptr<float>()).clone();
 }
 
 void DynamicDetector::applyDepthThresholdMask(const cv::Mat &imDepth, const cv::Rect &box, cv::Mat &mask) const

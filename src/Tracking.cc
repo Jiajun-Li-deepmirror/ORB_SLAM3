@@ -111,7 +111,11 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
             if(!node.empty()) nmsTh = static_cast<float>(node.real());
             node = fsDetector["Detector.DepthEpsilon"];
             if(!node.empty()) depthEps = static_cast<float>(node.real());
-            mpDynamicDetector = new DynamicDetector(onnxPath, confTh, nmsTh, depthEps);
+            bool useCuda = false;
+            node = fsDetector["Detector.UseCuda"];
+            if(!node.empty()) useCuda = static_cast<int>(node) != 0;
+            mpDynamicDetector = new DynamicDetector(onnxPath, confTh, nmsTh, depthEps,
+                                                     std::vector<int>{0}, useCuda);
         }
     }
 
