@@ -577,7 +577,11 @@ void MapPoint::PreSave(set<KeyFrame*>& spKF,set<MapPoint*>& spMP)
 
     mBackupObservationsId1.clear();
     mBackupObservationsId2.clear();
-    // Save the id and position in each KF who view it
+    // Save the id and position in each KF who view it. Observations from KFs that aren't being
+    // serialized are erased, but not while iterating mObservations itself -- EraseObservation()
+    // erases from that same map, which invalidates the iterator mid-loop (crashes inside
+    // std::_Rb_tree_increment on the very next ++it). Collect them and erase after the loop.
+    std::vector<KeyFrame*> vToErase;
     for(std::map<KeyFrame*,std::tuple<int,int> >::const_iterator it = mObservations.begin(), end = mObservations.end(); it != end; ++it)
     {
         KeyFrame* pKFi = it->first;
@@ -588,9 +592,11 @@ void MapPoint::PreSave(set<KeyFrame*>& spKF,set<MapPoint*>& spMP)
         }
         else
         {
-            EraseObservation(pKFi);
+            vToErase.push_back(pKFi);
         }
     }
+    for(KeyFrame* pKFi : vToErase)
+        EraseObservation(pKFi);
 
     // Save the id of the reference KF
     if(spKF.find(mpRefKF) != spKF.end())
