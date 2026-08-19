@@ -335,6 +335,10 @@ namespace ORB_SLAM3 {
 
         //Load stereo extrinsic calibration
         if(cameraType_ == Rectified){
+            //Rectified stereo pairs share the same intrinsics for both cameras
+            calibration2_ = calibration1_;
+            originalCalib2_ = originalCalib1_;
+
             b_ = readParameter<float>(fSettings,"Stereo.b",found);
             bf_ = b_ * calibration1_->getParameter(0);
         }
@@ -559,8 +563,10 @@ namespace ORB_SLAM3 {
                 output << "Kannala-Brandt";
             }
             output << "" << ": [";
-            for(size_t i = 0; i < settings.originalCalib2_->size(); i++){
-                output << " " << settings.originalCalib2_->getParameter(i);
+            if(settings.originalCalib2_){
+                for(size_t i = 0; i < settings.originalCalib2_->size(); i++){
+                    output << " " << settings.originalCalib2_->getParameter(i);
+                }
             }
             output << " ]" << endl;
 
