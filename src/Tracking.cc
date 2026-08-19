@@ -94,6 +94,27 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
         }
     }
 
+    // Optional YOLO-based dynamic-object masking (RGB-D only), see DynamicDetector.h.
+    // Read directly from strSettingPath so it works regardless of whether the settings
+    // file uses the newer File.version-based Settings class or the legacy fSettings path.
+    mpDynamicDetector = nullptr;
+    {
+        cv::FileStorage fsDetector(strSettingPath, cv::FileStorage::READ);
+        cv::FileNode node = fsDetector["Detector.OnnxPath"];
+        if(!node.empty() && node.isString())
+        {
+            std::string onnxPath = (std::string)node;
+            float confTh = 0.35f, nmsTh = 0.45f, depthEps = 0.4f;
+            node = fsDetector["Detector.ConfThreshold"];
+            if(!node.empty()) confTh = static_cast<float>(node.real());
+            node = fsDetector["Detector.NmsThreshold"];
+            if(!node.empty()) nmsTh = static_cast<float>(node.real());
+            node = fsDetector["Detector.DepthEpsilon"];
+            if(!node.empty()) depthEps = static_cast<float>(node.real());
+            mpDynamicDetector = new DynamicDetector(onnxPath, confTh, nmsTh, depthEps);
+        }
+    }
+
     initID = 0; lastID = 0;
     mbInitWith3KFs = false;
     mnNumDataset = 0;
@@ -1540,10 +1561,14 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
     if((fabs(mDepthMapFactor-1.0f)>1e-5) || imDepth.type()!=CV_32F)
         imDepth.convertTo(imDepth,CV_32F,mDepthMapFactor);
 
+    cv::Mat dynamicMask;
+    if(mpDynamicDetector && mpDynamicDetector->isEnabled())
+        dynamicMask = mpDynamicDetector->detectDynamicMask(imRGB, imDepth);
+
     if (mSensor == System::RGBD)
-        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
+        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,static_cast<Frame*>(NULL),IMU::Calib(),dynamicMask);
     else if(mSensor == System::IMU_RGBD)
-        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib);
+        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib,dynamicMask);
 
 
 

@@ -197,7 +197,7 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
     AssignFeaturesToGrid();
 }
 
-Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera,Frame* pPrevF, const IMU::Calib &ImuCalib)
+Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeStamp, ORBextractor* extractor,ORBVocabulary* voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth, GeometricCamera* pCamera,Frame* pPrevF, const IMU::Calib &ImuCalib, const cv::Mat &dynamicMask)
     :mpcpi(NULL),mpORBvocabulary(voc),mpORBextractorLeft(extractor),mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
      mTimeStamp(timeStamp), mK(K.clone()), mK_(Converter::toMatrix3f(K)),mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth),
      mImuCalib(ImuCalib), mpImuPreintegrated(NULL), mpPrevFrame(pPrevF), mpImuPreintegratedFrame(NULL), mpReferenceKF(static_cast<KeyFrame*>(NULL)), mbIsSet(false), mbImuPreintegrated(false),
@@ -226,6 +226,27 @@ Frame::Frame(const cv::Mat &imGray, const cv::Mat &imDepth, const double &timeSt
     mTimeORB_Ext = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndExtORB - time_StartExtORB).count();
 #endif
 
+    // Drop keypoints that fall on a dynamic-object pixel (see DynamicDetector) before they ever
+    // enter the tracking/mapping pipeline, instead of extracting them and only later trying to
+    // reject them as outliers during pose optimization.
+    if(!dynamicMask.empty())
+    {
+        std::vector<cv::KeyPoint> vKeysStatic;
+        vKeysStatic.reserve(mvKeys.size());
+        cv::Mat descriptorsStatic;
+        descriptorsStatic.reserve(mvKeys.size());
+        for(size_t i = 0; i < mvKeys.size(); i++)
+        {
+            const cv::KeyPoint &kp = mvKeys[i];
+            if(dynamicMask.at<uchar>(cvRound(kp.pt.y), cvRound(kp.pt.x)) == 0)
+            {
+                vKeysStatic.push_back(kp);
+                descriptorsStatic.push_back(mDescriptors.row(i));
+            }
+        }
+        mvKeys = vKeysStatic;
+        mDescriptors = descriptorsStatic;
+    }
 
     N = mvKeys.size();
 

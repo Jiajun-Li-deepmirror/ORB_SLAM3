@@ -38,6 +38,7 @@
 #include "Settings.h"
 
 #include "GeometricCamera.h"
+#include "DynamicDetector.h"
 
 #include <mutex>
 #include <unordered_set>
@@ -260,6 +261,10 @@ protected:
     //ORB
     ORBextractor* mpORBextractorLeft, *mpORBextractorRight;
     ORBextractor* mpIniORBextractor;
+
+    // Optional YOLO-based dynamic-object masking (RGB-D only). Null if Detector.OnnxPath
+    // is not set in the settings file.
+    DynamicDetector* mpDynamicDetector;
 
     //BoW
     ORBVocabulary* mpORBVocabulary;

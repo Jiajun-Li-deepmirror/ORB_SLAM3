@@ -82,6 +82,8 @@ src/GeometricTools.cc
 src/TwoViewReconstruction.cc
 src/Config.cc
 src/Settings.cc
+src/DynamicDetector.cc
+include/DynamicDetector.h
 include/System.h
 include/Tracking.h
 include/LocalMapping.h
