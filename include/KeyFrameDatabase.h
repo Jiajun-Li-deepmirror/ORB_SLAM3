@@ -42,6 +42,7 @@ namespace ORB_SLAM3
 class KeyFrame;
 class Frame;
 class Map;
+class PlaceRecognizer;
 
 
 class KeyFrameDatabase
@@ -63,6 +64,12 @@ public:
     void add(KeyFrame* pKF);
 
     void erase(KeyFrame* pKF);
+
+    // Optional: when set, erase() also removes pKF from the CosPlace-based candidate database
+    // (see PlaceRecognizer), so callers of erase() don't need their own separate call. There is
+    // no equivalent hook on add() because PlaceRecognizer needs the keyframe's image to compute
+    // a descriptor, which isn't available here -- see Tracking::CreateNewKeyFrame() instead.
+    void SetPlaceRecognizer(PlaceRecognizer* pPlaceRecognizer) { mpPlaceRecognizer = pPlaceRecognizer; }
 
     void clear();
     void clearMap(Map* pMap);
@@ -89,6 +96,9 @@ protected:
 
    // Inverted file
    std::vector<list<KeyFrame*> > mvInvertedFile;
+
+   // See SetPlaceRecognizer(). Null (default) if CosPlace-based candidate detection is disabled.
+   PlaceRecognizer* mpPlaceRecognizer = nullptr;
 
    // For save relation without pointer, this is necessary for save/load function
    std::vector<list<long unsigned int> > mvBackupInvertedFileId;

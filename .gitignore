@@ -66,6 +66,8 @@ Thirdparty/g2o/config.h
 Thirdparty/g2o/lib/
 Vocabulary/ORBvoc.txt
 build/
+build_cosplace/
+build_hfnet/
 
 lib/
 

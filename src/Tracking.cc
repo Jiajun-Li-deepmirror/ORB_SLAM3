@@ -94,6 +94,30 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
         }
     }
 
+    // Optional CosPlace-based place recognition (see PlaceRecognizer.h). Read directly from
+    // strSettingPath, same rationale as DynamicDetector in the Dynamic-VINS branch: works
+    // regardless of whether the settings file uses the newer Settings class or legacy fSettings.
+    mpPlaceRecognizer = nullptr;
+    {
+        cv::FileStorage fsPR(strSettingPath, cv::FileStorage::READ);
+        cv::FileNode node = fsPR["PlaceRecognition.OnnxPath"];
+        if(!node.empty() && node.isString())
+        {
+            std::string onnxPath = (std::string)node;
+            bool useCuda = false;
+            node = fsPR["PlaceRecognition.UseCuda"];
+            if(!node.empty()) useCuda = static_cast<int>(node) != 0;
+            int width = 640, height = 480;
+            node = fsPR["PlaceRecognition.InputWidth"];
+            if(!node.empty()) width = static_cast<int>(node);
+            node = fsPR["PlaceRecognition.InputHeight"];
+            if(!node.empty()) height = static_cast<int>(node);
+            mpPlaceRecognizer = new PlaceRecognizer(onnxPath, useCuda, width, height);
+        }
+    }
+    if(mpPlaceRecognizer && mpPlaceRecognizer->isEnabled() && pKFDB)
+        pKFDB->SetPlaceRecognizer(mpPlaceRecognizer);
+
     initID = 0; lastID = 0;
     mbInitWith3KFs = false;
     mnNumDataset = 0;
@@ -3223,6 +3247,20 @@ void Tracking::CreateNewKeyFrame()
 
     KeyFrame* pKF = new KeyFrame(mCurrentFrame,mpAtlas->GetCurrentMap(),mpKeyFrameDB);
 
+    if(mpPlaceRecognizer && mpPlaceRecognizer->isEnabled())
+    {
+        // mImGray is the grayscale image for the frame that just became this keyframe (CosPlace
+        // doesn't need colour -- it's trained on ImageNet-style inputs, grayscale replicated to
+        // 3 channels loses some discriminative power but is a reasonable approximation and
+        // avoids threading a separate colour image through the RGB-D/stereo pipelines).
+        //
+        // Queued asynchronously, not computed here: a synchronous call blocked this thread for
+        // the full inference time on every keyframe, which was found to reproducibly cause
+        // tracking loss on KITTI under the CUDA execution provider -- see RequestKeyFrame()'s
+        // comment in PlaceRecognizer.h for why.
+        mpPlaceRecognizer->RequestKeyFrame(pKF, mImGray);
+    }
+
     if(mpAtlas->isImuInitialized()) //  || mpLocalMapper->IsInitializing())
         pKF->bImu = true;
 
@@ -3615,6 +3653,21 @@ bool Tracking::Relocalization()
     // Relocalization is performed when tracking is lost
     // Track Lost: Query KeyFrame Database for keyframe candidates for relocalisation
     vector<KeyFrame*> vpCandidateKFs = mpKeyFrameDB->DetectRelocalizationCandidates(&mCurrentFrame, mpAtlas->GetCurrentMap());
+
+    // Additional candidates from CosPlace, for the case DBoW2 found nothing (or too few) because
+    // the scene's appearance changed too much since this keyframe was mapped (lighting, season,
+    // viewpoint) for the ORB bag-of-words histograms to still overlap -- see PlaceRecognizer.h.
+    if(mpPlaceRecognizer && mpPlaceRecognizer->isEnabled())
+    {
+        std::vector<float> queryDesc = mpPlaceRecognizer->computeDescriptor(mImGray);
+        std::set<KeyFrame*> alreadyHave(vpCandidateKFs.begin(), vpCandidateKFs.end());
+        std::vector<KeyFrame*> vpPRCand = mpPlaceRecognizer->findTopK(queryDesc, 5, alreadyHave);
+        for(KeyFrame* pKFi : vpPRCand)
+        {
+            if(pKFi->GetMap() == mpAtlas->GetCurrentMap() && !alreadyHave.count(pKFi))
+                vpCandidateKFs.push_back(pKFi);
+        }
+    }
 
     if(vpCandidateKFs.empty()) {
         Verbose::PrintMess("There are not candidates", Verbose::VERBOSITY_NORMAL);

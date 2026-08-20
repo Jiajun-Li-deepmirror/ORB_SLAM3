@@ -20,6 +20,7 @@
 #include "KeyFrameDatabase.h"
 
 #include "KeyFrame.h"
+#include "PlaceRecognizer.h"
 #include "Thirdparty/DBoW2/DBoW2/BowVector.h"
 
 #include<mutex>
@@ -46,6 +47,9 @@ void KeyFrameDatabase::add(KeyFrame *pKF)
 
 void KeyFrameDatabase::erase(KeyFrame* pKF)
 {
+    if(mpPlaceRecognizer)
+        mpPlaceRecognizer->eraseKeyFrame(pKF);
+
     unique_lock<mutex> lock(mMutex);
 
     // Erase elements in the Inverse File for the entry

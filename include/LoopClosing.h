@@ -27,6 +27,7 @@
 #include "Tracking.h"
 
 #include "KeyFrameDatabase.h"
+#include "PlaceRecognizer.h"
 
 #include <boost/algorithm/string.hpp>
 #include <thread>
@@ -57,6 +58,11 @@ public:
     void SetTracker(Tracking* pTracker);
 
     void SetLocalMapper(LocalMapping* pLocalMapper);
+
+    // Optional: shares Tracking's PlaceRecognizer instance (see PlaceRecognizer.h) so loop/merge
+    // candidate detection can fall back to CosPlace-based retrieval when DBoW2 finds nothing.
+    // Null (default) means CosPlace-based candidates are simply not added.
+    void SetPlaceRecognizer(PlaceRecognizer* pPlaceRecognizer) { mpPlaceRecognizer = pPlaceRecognizer; }
 
     // Main function
     void Run();
@@ -160,6 +166,7 @@ protected:
     Tracking* mpTracker;
 
     KeyFrameDatabase* mpKeyFrameDB;
+    PlaceRecognizer* mpPlaceRecognizer = nullptr;
     ORBVocabulary* mpORBVocabulary;
 
     LocalMapping *mpLocalMapper;

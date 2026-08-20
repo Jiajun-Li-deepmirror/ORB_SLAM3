@@ -27,6 +27,8 @@
 
 #include<mutex>
 #include<thread>
+#include<algorithm>
+#include<set>
 
 
 namespace ORB_SLAM3
@@ -495,6 +497,31 @@ bool LoopClosing::NewDetectCommonRegions()
         double timeDataQuery = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndQuery - time_StartQuery).count();
         vdDataQuery_ms.push_back(timeDataQuery);
 #endif
+
+        // Additional candidates from CosPlace, for places DBoW2's word histograms no longer
+        // overlap with (lighting/season/viewpoint change since mapping) -- see
+        // PlaceRecognizer.h. Same covisibility exclusion as DBoW2's own DetectNBestCandidates:
+        // an already-connected neighbour isn't a "new" loop/merge candidate.
+        if(mpPlaceRecognizer && mpPlaceRecognizer->isEnabled())
+        {
+            std::vector<float> queryDesc = mpPlaceRecognizer->getDescriptor(mpCurrentKF);
+            std::set<KeyFrame*> exclude(vpConnectedKeyFrames.begin(), vpConnectedKeyFrames.end());
+            exclude.insert(mpCurrentKF);
+            std::vector<KeyFrame*> vpPRCand = mpPlaceRecognizer->findTopK(queryDesc, 3, exclude);
+            for(KeyFrame* pKFi : vpPRCand)
+            {
+                if(pKFi->GetMap() == mpCurrentKF->GetMap())
+                {
+                    if(std::find(vpLoopBowCand.begin(), vpLoopBowCand.end(), pKFi) == vpLoopBowCand.end())
+                        vpLoopBowCand.push_back(pKFi);
+                }
+                else if(!pKFi->GetMap()->IsBad())
+                {
+                    if(std::find(vpMergeBowCand.begin(), vpMergeBowCand.end(), pKFi) == vpMergeBowCand.end())
+                        vpMergeBowCand.push_back(pKFi);
+                }
+            }
+        }
     }
 
 #ifdef REGISTER_TIMES

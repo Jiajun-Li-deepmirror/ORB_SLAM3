@@ -222,6 +222,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
 
     mpLoopCloser->SetTracker(mpTracker);
     mpLoopCloser->SetLocalMapper(mpLocalMapper);
+    mpLoopCloser->SetPlaceRecognizer(mpTracker->GetPlaceRecognizer());
 
     //usleep(10*1000*1000);
 
@@ -523,6 +524,8 @@ void System::Shutdown()
 
     mpLocalMapper->RequestFinish();
     mpLoopCloser->RequestFinish();
+    if(mpTracker->GetPlaceRecognizer())
+        mpTracker->GetPlaceRecognizer()->RequestFinish();
     /*if(mpViewer)
     {
         mpViewer->RequestFinish();

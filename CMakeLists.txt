@@ -12,11 +12,19 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall   -O3")
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
 
-# Check C++11 or C++0x support
+# Check C++14, C++11 or C++0x support. C++14 is required when WITH_ORT_CUDA is enabled: ONNX
+# Runtime's onnxruntime_cxx_api.h uses constexpr constructors with a statement body (`{ val = v; }`),
+# which C++11's much stricter constexpr rules (effectively a single return statement only) reject
+# with "constexpr constructor does not have empty body" -- C++14 relaxed this.
 include(CheckCXXCompilerFlag)
+CHECK_CXX_COMPILER_FLAG("-std=c++14" COMPILER_SUPPORTS_CXX14)
 CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
 CHECK_CXX_COMPILER_FLAG("-std=c++0x" COMPILER_SUPPORTS_CXX0X)
-if(COMPILER_SUPPORTS_CXX11)
+if(COMPILER_SUPPORTS_CXX14)
+   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14")
+   add_definitions(-DCOMPILEDWITHC11)
+   message(STATUS "Using flag -std=c++14.")
+elseif(COMPILER_SUPPORTS_CXX11)
    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
    add_definitions(-DCOMPILEDWITHC11)
    message(STATUS "Using flag -std=c++11.")
@@ -41,6 +49,24 @@ MESSAGE(${OpenCV_VERSION})
 find_package(Eigen3 3.1.0 REQUIRED)
 find_package(Pangolin REQUIRED)
 find_package(realsense2)
+
+# Optional: ONNX Runtime + CUDA execution provider, used by PlaceRecognizer (CosPlace) and, on
+# the Dynamic-VINS branch, DynamicDetector (YOLO). Set ONNXRUNTIME_ROOT to the extracted
+# onnxruntime-linux-x64-gpu-*.tgz release directory to enable it.
+set(ONNXRUNTIME_ROOT "" CACHE PATH "Path to an extracted onnxruntime-linux-x64-gpu release (enables WITH_ORT_CUDA)")
+if(ONNXRUNTIME_ROOT)
+    find_library(ONNXRUNTIME_LIB onnxruntime PATHS "${ONNXRUNTIME_ROOT}/lib" NO_DEFAULT_PATH)
+    if(ONNXRUNTIME_LIB)
+        message(STATUS "Found ONNX Runtime at ${ONNXRUNTIME_ROOT}, enabling WITH_ORT_CUDA")
+        add_definitions(-DWITH_ORT_CUDA)
+        include_directories(${ONNXRUNTIME_ROOT}/include)
+        # So built binaries find libonnxruntime.so / libonnxruntime_providers_cuda.so at runtime
+        # without needing LD_LIBRARY_PATH set.
+        set(CMAKE_BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib")
+    else()
+        message(WARNING "ONNXRUNTIME_ROOT was set but libonnxruntime.so was not found under ${ONNXRUNTIME_ROOT}/lib")
+    endif()
+endif()
 
 include_directories(
 ${PROJECT_SOURCE_DIR}
@@ -82,6 +108,8 @@ src/GeometricTools.cc
 src/TwoViewReconstruction.cc
 src/Config.cc
 src/Settings.cc
+src/PlaceRecognizer.cc
+include/PlaceRecognizer.h
 include/System.h
 include/Tracking.h
 include/LocalMapping.h
@@ -124,6 +152,10 @@ ${PROJECT_SOURCE_DIR}/Thirdparty/g2o/lib/libg2o.so
 -lboost_serialization
 -lcrypto
 )
+
+if(ONNXRUNTIME_LIB)
+    target_link_libraries(${PROJECT_NAME} ${ONNXRUNTIME_LIB})
+endif()
 
 # If RealSense SDK is found the library is added and its examples compiled
 if(realsense2_FOUND)
@@ -196,6 +228,14 @@ target_link_libraries(mono_tum ${PROJECT_NAME})
 add_executable(mono_kitti
         Examples/Monocular/mono_kitti.cc)
 target_link_libraries(mono_kitti ${PROJECT_NAME})
+
+if(ONNXRUNTIME_LIB)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/PlaceRecognition)
+    add_executable(nordland_vpr_eval
+            Examples/PlaceRecognition/nordland_vpr_eval.cc)
+    target_link_libraries(nordland_vpr_eval ${PROJECT_NAME})
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Monocular)
+endif()
 
 add_executable(mono_euroc
         Examples/Monocular/mono_euroc.cc)

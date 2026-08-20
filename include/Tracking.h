@@ -38,6 +38,7 @@
 #include "Settings.h"
 
 #include "GeometricCamera.h"
+#include "PlaceRecognizer.h"
 
 #include <mutex>
 #include <unordered_set>
@@ -264,6 +265,15 @@ protected:
     //BoW
     ORBVocabulary* mpORBVocabulary;
     KeyFrameDatabase* mpKeyFrameDB;
+
+    // Optional CosPlace-based place recognition, see PlaceRecognizer.h. Null if
+    // PlaceRecognition.OnnxPath isn't set in the settings file. Shared with LoopClosing via
+    // GetPlaceRecognizer()/LoopClosing::SetPlaceRecognizer() -- Tracking owns and populates it
+    // (it has the raw keyframe image), LoopClosing and Relocalization() both query it.
+public:
+    PlaceRecognizer* GetPlaceRecognizer() { return mpPlaceRecognizer; }
+protected:
+    PlaceRecognizer* mpPlaceRecognizer;
 
     // Initalization (only for monocular)
     bool mbReadyToInitializate;
