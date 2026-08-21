@@ -1,0 +1,72 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters. Adjust them!
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+# OpenLORIS-Scene office1-1: RealSense D435i color camera, paired with its own
+# depth stream aligned into the color frame (dataset's "aligned_depth" folder), so
+# a standard RGB-D pipeline can be used directly. Intrinsics come straight from the
+# dataset's own office1-1/sensors.yaml (d400_color_optical_frame), not re-estimated.
+Camera1.fx: 611.45098876953125
+Camera1.fy: 611.48571777343750
+Camera1.cx: 433.20397949218750
+Camera1.cy: 249.47302246093750
+
+Camera1.k1: 0.0
+Camera1.k2: 0.0
+Camera1.p1: 0.0
+Camera1.p2: 0.0
+
+Camera.width: 848
+Camera.height: 480
+
+# Camera frames per second
+Camera.fps: 30
+
+# Color order of the images (0: BGR, 1: RGB. It is ignored if images are grayscale)
+Camera.RGB: 1
+
+# Close/Far threshold. Real D435i color<->depth baseline from office1-1/trans_matrix.yaml's
+# d400_color_optical_frame -> d400_depth_optical_frame tf_static translation (~14.9mm),
+# not TUM's Kinect-projector value.
+Stereo.ThDepth: 40.0
+Stereo.b: 0.0149
+
+# Depth map values factor: aligned_depth PNGs are 16-bit millimeters (max observed ~2.6m,
+# consistent with RealSense's raw-mm convention), so factor = 1000 converts mm -> m.
+RGBD.DepthMapFactor: 1000.0
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+
+# ORB Extractor: Number of features per image
+ORBextractor.nFeatures: 1000
+
+# ORB Extractor: Scale factor between levels in the scale pyramid
+ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid
+ORBextractor.nLevels: 8
+
+# ORB Extractor: Fast threshold
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0

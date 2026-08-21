@@ -1,0 +1,129 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters. Adjust them!
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+Camera.type: "KannalaBrandt8"
+
+# OpenLORIS-Scene office1-1: RealSense T265's dual fisheye pair (used as the stereo pair here --
+# per OpenLORIS-Scene's own docs, T265 fisheye is the recommended source for stereo algorithms,
+# not D435i's color/depth). All values below come directly from the dataset's own
+# office1-1/sensors.yaml and trans_matrix.yaml (RealSense factory calibration for intrinsics,
+# tf_static-derived extrinsics), not re-estimated.
+
+# Left Camera (t265_fisheye1) calibration and distortion parameters
+Camera1.fx: 284.98089599609375
+Camera1.fy: 286.10238647460938
+Camera1.cx: 425.24438476562500
+Camera1.cy: 398.46759033203125
+
+# Kannala-Brandt distortion parameters
+Camera1.k1: -0.0073047108016908169
+Camera1.k2: 0.043499931693077087
+Camera1.k3: -0.041283041238784790
+Camera1.k4: 0.0076524601317942142
+
+# Right Camera (t265_fisheye2) calibration and distortion parameters
+Camera2.fx: 284.81259155273438
+Camera2.fy: 285.97601318359375
+Camera2.cx: 427.66159057617188
+Camera2.cy: 397.12341308593750
+
+# Kannala-Brandt distortion parameters
+Camera2.k1: -0.0063794981688261032
+Camera2.k2: 0.041455611586570740
+Camera2.k3: -0.039464488625526428
+Camera2.k4: 0.0069808149710297585
+
+# Transformation matrix from right camera (fisheye2) to left camera (fisheye1), taken directly
+# from trans_matrix.yaml's fisheye1<-fisheye2 tf_static entry.
+Stereo.T_c1_c2: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: f
+  data: [ 9.9997103351978955e-01, -3.0859078732664710e-03,  6.9576787768359741e-03,  6.3976511359200003e-02,
+          3.1121161181976121e-03,  9.9998809175217129e-01, -3.7591338254934705e-03,  1.4826713595499999e-04,
+         -6.9459955824040347e-03,  3.7806780408845384e-03,  9.9996872932053249e-01, -3.9846837171399999e-04,
+          0.0,0.0,0.0,1.0]
+
+# Lapping area between images -- unknown without visual inspection/recalibration, so the full
+# image width is used (permissive default; identical in both baseline and SuperPoint-LightGlue
+# configs, so it doesn't bias the comparison).
+Camera1.overlappingBegin: 0
+Camera1.overlappingEnd: 847
+
+Camera2.overlappingBegin: 0
+Camera2.overlappingEnd: 847
+
+# Camera resolution
+Camera.width: 848
+Camera.height: 800
+
+# Camera frames per second
+Camera.fps: 30
+
+# Color order of the images (0: BGR, 1: RGB. It is ignored if images are grayscale)
+Camera.RGB: 1
+
+# Close/Far threshold. Baseline times (baseline ~0.064m here, vs TUM-VI's ~0.10m).
+Stereo.ThDepth: 40.0
+
+# Transformation from body-frame (imu, = t265_gyroscope/accelerometer -- co-located per
+# trans_matrix.yaml) to left camera (fisheye1). Computed as the inverse of trans_matrix.yaml's
+# fisheye1<-gyroscope tf_static entry.
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [-9.9992633141677356e-01, -4.9039224756951836e-03,  1.1103300578872332e-02,  1.0699210334022371e-02,
+           4.9341275780694378e-03, -9.9998419659493687e-01,  2.6946141507085812e-03, -5.2795150761128149e-05,
+           1.1089910930018763e-02,  2.7492007438955648e-03,  9.9993472575505338e-01, -1.1866200220366494e-04,
+           0.0, 0.0, 0.0, 1.0]
+
+# IMU noise: derived from office1-1/sensors.yaml's t265_gyroscope/t265_accelerometer
+# noise_variances/bias_variances via sigma_continuous = sqrt(variance_discrete * dt) for the
+# white-noise terms (dt = 1/fps; this formula reproduces TUM-VI's own published IMU.NoiseGyro
+# almost exactly when applied to TUM-VI's own sensor variances, which is why it's trusted here)
+# and sigma_continuous = sqrt(bias_variance) for the random-walk terms (a coarser approximation
+# absent an Allan-variance analysis, but applied identically in both configs).
+IMU.NoiseGyro: 0.00016
+IMU.NoiseAcc: 0.00104
+IMU.GyroWalk: 0.0000707
+IMU.AccWalk: 0.01
+IMU.Frequency: 200.0
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+
+# ORB Extractor: Number of features per image
+ORBextractor.nFeatures: 1000 # Tested with 1250
+
+# ORB Extractor: Scale factor between levels in the scale pyramid 	
+ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid	
+ORBextractor.nLevels: 8
+
+# ORB Extractor: Fast threshold
+# Image is divided in a grid. At each cell FAST are extracted imposing a minimum response.
+# Firstly we impose iniThFAST. If no corners are detected we impose a lower value minThFAST
+# You can lower these values if your images have low contrast			
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0
