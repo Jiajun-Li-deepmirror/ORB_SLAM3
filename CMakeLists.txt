@@ -180,6 +180,10 @@ add_executable(stereo_tum_vi
         Examples/Stereo/stereo_tum_vi.cc)
 target_link_libraries(stereo_tum_vi ${PROJECT_NAME})
 
+add_executable(stereo_openloris
+        Examples/Stereo/stereo_openloris.cc)
+target_link_libraries(stereo_openloris ${PROJECT_NAME})
+
 if(realsense2_FOUND)
     add_executable(stereo_realsense_t265
             Examples/Stereo/stereo_realsense_t265.cc)
