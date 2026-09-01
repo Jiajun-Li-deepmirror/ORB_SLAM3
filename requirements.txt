@@ -1,0 +1,14 @@
+# torch/torchvision installed separately with the correct CUDA index:
+#   pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision
+# gtsam's pip wheel is built against the numpy 1.x ABI and segfaults under numpy>=2,
+# so numpy and opencv are pinned to versions that still support numpy 1.x.
+numpy<2
+opencv-python==4.10.0.84
+opencv-contrib-python==4.10.0.84
+pyyaml
+scipy
+matplotlib
+tqdm
+open3d
+lightglue @ git+https://github.com/cvg/LightGlue.git
+gtsam
