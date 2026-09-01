@@ -42,7 +42,11 @@ class Relocalizer:
         at construction time. CUDA kernel selection/compilation and cuDNN autotuning happen
         on a model's first real invocation regardless of input content, costing ~400ms; doing
         that here means the cost lands once at startup instead of on an arbitrary query."""
-        dummy_img = np.zeros((h, w), dtype=np.uint8)
+        # Random noise, not zeros: a constant image makes SuperPoint detect ~0 keypoints,
+        # which (especially under torch.compile) would trace/specialize a degenerate
+        # near-empty case instead of the realistic keypoint counts real queries produce.
+        rng = np.random.default_rng(0)
+        dummy_img = rng.integers(0, 256, size=(h, w), dtype=np.uint8)
         feats = self.splg.extract(dummy_img)
         self.splg.match(feats, feats)
         self.global_extractor.extract(dummy_img)

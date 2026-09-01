@@ -25,6 +25,11 @@ class SPLG:
         # at full fp32 precision/behavior untouched, and autocast lets ops that are numerically
         # sensitive (e.g. softmax in attention) stay in fp32 internally even under the context.
         self.use_fp16 = use_fp16 and self.device.type == "cuda"
+        # Tried torch.compile(dynamic=True) on extractor/matcher forward here for localization
+        # latency: steady-state median was no better than plain fp16 autocast, but the number
+        # of detected keypoints varies per call, and dynamic shape tracing doesn't guarantee no
+        # recompiles - occasionally hit a fresh shape mid-run and stalled a single query for
+        # 4-11 SECONDS. Unacceptable tail latency for a real-time relocalizer, reverted.
 
     @torch.no_grad()
     def extract(self, img: np.ndarray) -> dict:
