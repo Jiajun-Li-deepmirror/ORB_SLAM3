@@ -9,10 +9,12 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from splg_slam.config import load_config
-from splg_slam.data.euroc import load_stereo_frames, load_stereo_rig
+from splg_slam.data.euroc import load_imu_calibration, load_imu_measurements, load_stereo_frames, load_stereo_rig
 from splg_slam.geometry.stereo import StereoRectifier
 from splg_slam.localization.retrieval import GlobalDescriptorExtractor, GlobalDescriptorIndex
 from splg_slam.map.io import save_map
+from splg_slam.mapping.imu_init import run_dynamic_imu_init, run_periodic_imu_reinit
+from splg_slam.mapping.imu_preintegration import make_preintegration_params
 from splg_slam.mapping.local_ba import local_bundle_adjustment
 from splg_slam.mapping.loop_closure import (
     LoopConsistencyTracker,
@@ -34,8 +36,26 @@ def main():
     rig = load_stereo_rig(cfg.dataset.mav0_dir)
     rectifier = StereoRectifier(rig)
     global_extractor = GlobalDescriptorExtractor() if getattr(cfg, "retrieval", None) and cfg.retrieval.enabled else None
-    mapper = OfflineMapper(cfg, rectifier, global_extractor=global_extractor)
     stereo_ba_baseline = rectifier.baseline if getattr(cfg.mapping, "stereo_ba_enabled", False) else None
+
+    imu_enabled = bool(getattr(cfg, "imu", None) and cfg.imu.enabled)
+    imu_calib = load_imu_calibration(cfg.dataset.mav0_dir) if imu_enabled else None
+    imu_measurements = load_imu_measurements(cfg.dataset.mav0_dir) if imu_enabled else None
+    imu_params = (
+        make_preintegration_params(imu_calib, cfg.imu.gravity_norm, cfg.imu.integration_sigma) if imu_enabled else None
+    )
+
+    mapper = OfflineMapper(
+        cfg, rectifier, global_extractor=global_extractor,
+        imu_measurements=imu_measurements, imu_calib=imu_calib,
+    )
+    # Instead of a hand-picked list of keyframe counts, keep checking periodically and only
+    # keep a correction that's at least as self-consistent (by gravity-magnitude error, a
+    # ground-truth-free sanity signal) as the last one applied - see run_periodic_imu_reinit.
+    next_reinit_check_kf = getattr(cfg.imu, "reinit_min_kf", 20) if imu_enabled else None
+    reinit_check_every_kf = getattr(cfg.imu, "reinit_check_every_kf", 15)
+    reinit_gravity_tolerance = getattr(cfg.imu, "reinit_gravity_tolerance", 0.08)
+    best_reinit_gravity_error: float | None = None
 
     entries = load_stereo_frames(cfg.dataset.mav0_dir)
     stride = cfg.dataset.frame_stride or 1
@@ -75,13 +95,92 @@ def main():
             n_tracked += 1
             if is_kf:
                 n_keyframes += 1
+
+                just_reinitialized = False
+
+                if imu_enabled and mapper.imu_init_pending and n_keyframes >= cfg.imu.init_dynamic_window_kf:
+                    init_window = mapper.world_map.keyframe_ids_sorted()[: cfg.imu.init_dynamic_window_kf]
+                    diag = run_dynamic_imu_init(mapper.world_map, init_window, imu_calib, imu_params, cfg.imu.gravity_norm)
+                    if diag is None:
+                        print("  dynamic IMU init: IMU-factor chain incomplete so far, will retry later")
+                    else:
+                        mapper.imu_init_pending = False
+                        just_reinitialized = True
+                        print(
+                            f"  dynamic IMU init done over {len(init_window)} keyframes: "
+                            f"|g|={diag['gravity_norm_estimated']:.3f} (expected {diag['gravity_norm_expected']:.3f}), "
+                            f"gyro_bias={diag['gyro_bias']}"
+                        )
+
+                if (
+                    imu_enabled and not mapper.imu_init_pending
+                    and next_reinit_check_kf is not None and n_keyframes >= next_reinit_check_kf
+                ):
+                    # ORB-SLAM3-style staged re-optimization (VIBA1/VIBA2): the bootstrap
+                    # solve above only sees a small, low-motion-diversity window, and never
+                    # solves accelerometer bias at all. Redo the same solve later with much
+                    # more accumulated data (and now including accel bias) - runs regardless
+                    # of whether the bootstrap took the static or dynamic path. No fixed
+                    # window size: keep checking every reinit_check_every_kf keyframes and
+                    # only keep a correction that's at least as self-consistent (by gravity-
+                    # magnitude error) as the last one applied - a longer window isn't
+                    # reliably better, since the solve trusts the vision trajectory as ground
+                    # truth and that trajectory's own drift grows with the window too.
+                    next_reinit_check_kf += reinit_check_every_kf
+                    all_kf_ids = mapper.world_map.keyframe_ids_sorted()
+                    diag = run_periodic_imu_reinit(
+                        mapper.world_map, all_kf_ids, imu_calib, imu_params, cfg.imu.gravity_norm,
+                        gravity_error_tolerance=reinit_gravity_tolerance, best_gravity_error_so_far=best_reinit_gravity_error,
+                    )
+                    if diag is None:
+                        print(f"  IMU reinit check @ {n_keyframes}kf: no surviving IMU-factor chain, skipped")
+                    elif diag["accepted"]:
+                        best_reinit_gravity_error = diag["gravity_error"]
+                        just_reinitialized = True
+                        print(
+                            f"  IMU reinit ACCEPTED @ {n_keyframes}kf, over {diag['num_keyframes']} keyframes "
+                            f"({diag['num_pairs']} pairs): |g|={diag['gravity_norm_estimated']:.3f} "
+                            f"(expected {diag['gravity_norm_expected']:.3f}, error {diag['gravity_error']:.1%}), "
+                            f"gyro_bias={diag['gyro_bias']}, accel_bias={diag['accel_bias']}"
+                        )
+                    else:
+                        print(
+                            f"  IMU reinit check @ {n_keyframes}kf: not accepted (error {diag['gravity_error']:.1%}, "
+                            f"best so far {best_reinit_gravity_error if best_reinit_gravity_error is not None else float('nan'):.1%})"
+                        )
+
                 if cfg.mapping.periodic_local_ba_enabled and n_keyframes % cfg.mapping.local_ba_every_n_kf == 0:
                     window = mapper.world_map.covisible_window(
                         result.frame_id, window_size=cfg.mapping.local_ba_window_size,
                         min_shared=cfg.mapping.local_ba_min_shared,
                     )
+                    if imu_enabled and not mapper.imu_init_pending:
+                        # covisible_window() picks keyframes by shared map points, not
+                        # temporal order - most periodic local BA calls would otherwise
+                        # include only one end of most imu_factors and skip them entirely
+                        # (see local_bundle_adjustment's "both ends touched" requirement).
+                        # Pull in the missing temporal neighbor for any factor straddling
+                        # the window's boundary, so the IMU chain is actually used
+                        # throughout tracking instead of only in the one final global BA.
+                        window_set = set(window)
+                        imu_neighbors = set()
+                        for a, b, _ in mapper.world_map.imu_factors:
+                            if a in window_set and b not in window_set and b in mapper.world_map.keyframes:
+                                imu_neighbors.add(b)
+                            elif b in window_set and a not in window_set and a in mapper.world_map.keyframes:
+                                imu_neighbors.add(a)
+                        window = window + list(imu_neighbors)
                     if len(window) >= 3:
-                        ba_stats = local_bundle_adjustment(mapper.world_map, window, rectifier.K_rect, baseline=stereo_ba_baseline)
+                        # Skip imu_factors while dynamic init is still pending (world frame
+                        # isn't gravity-aligned yet) or right after a (re)init just fired
+                        # this same iteration (poses/velocities/points were just rotated in
+                        # place - run BA against that on the NEXT keyframe, not immediately).
+                        use_imu = imu_enabled and not mapper.imu_init_pending and not just_reinitialized
+                        ba_stats = local_bundle_adjustment(
+                            mapper.world_map, window, rectifier.K_rect, baseline=stereo_ba_baseline,
+                            imu_factors=mapper.world_map.imu_factors if use_imu else None,
+                            imu_calib=imu_calib if use_imu else None, imu_params=imu_params if use_imu else None,
+                        )
                         if ba_stats["rejected"]:
                             print(
                                 f"  local BA around kf{result.frame_id} REJECTED (would move a keyframe "
@@ -151,6 +250,12 @@ def main():
                         result.frame_id, window_size=cfg.mapping.local_ba_window_size,
                         min_shared=cfg.mapping.local_ba_min_shared,
                     )
+                    # Not protecting imu_factors' endpoints here (unlike loop_edges): with IMU
+                    # enabled, nearly every consecutive keyframe pair has one, so doing so
+                    # would protect almost the whole map and defeat culling entirely. A
+                    # culled keyframe just leaves a gap in the IMU factor chain instead (the
+                    # same graceful-degradation the reloc/loop-closure gaps already rely on) -
+                    # local_bundle_adjustment skips any imu_factor whose endpoint is gone.
                     protected = {0, result.frame_id, mapper.ref_keyframe.frame_id}
                     for a, b, _, _ in mapper.world_map.loop_edges:
                         protected.add(a)
@@ -186,12 +291,19 @@ def main():
         f"map_points={len(mapper.world_map.map_points)} loops={n_loops} reloc={mapper.n_relocalizations}"
     )
 
+    if imu_enabled and mapper.imu_init_pending:
+        print("  dynamic IMU init never completed (chain never reached the required window) - "
+              "final BA will run vision-only, without IMU factors")
+
     if getattr(cfg.mapping, "final_global_ba", False) and n_keyframes >= 3:
         t0 = time.monotonic()
         all_kf_ids = mapper.world_map.keyframe_ids_sorted()
+        use_imu = imu_enabled and not mapper.imu_init_pending
         stats = local_bundle_adjustment(
             mapper.world_map, all_kf_ids, rectifier.K_rect, baseline=stereo_ba_baseline,
             loop_edges=mapper.world_map.loop_edges, loop_min_inliers=loop_cfg.min_inliers if loop_enabled else 60,
+            imu_factors=mapper.world_map.imu_factors if use_imu else None,
+            imu_calib=imu_calib if use_imu else None, imu_params=imu_params if use_imu else None,
         )
         print(
             f"Final global BA ({len(all_kf_ids)} keyframes, {stats['num_points']} points, "

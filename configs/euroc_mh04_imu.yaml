@@ -1,5 +1,5 @@
 dataset:
-  mav0_dir: /home/danny/slam_ws/datasets/machine_hall/MH_03_medium/mav0
+  mav0_dir: /home/danny/slam_ws/datasets/machine_hall/MH_04_difficult/mav0
   frame_stride: 1        # process every Nth stereo pair
   max_frames: null        # null = process all available frames
 
@@ -13,7 +13,7 @@ stereo:
   max_depth_m: 20.0        # discard stereo depth beyond this range (baseline/fx makes far depth noisy)
 
 imu:
-  enabled: false          # opt-in tight IMU fusion (CombinedImuFactor in local/global BA); vision-only when false
+  enabled: true           # opt-in tight IMU fusion (CombinedImuFactor in local/global BA); vision-only when false
   integration_sigma: 1.0e-4
   gravity_norm: 9.81007
   init_static_samples: 200   # ~1s @ 200Hz, leading samples averaged for gravity-alignment bootstrap
@@ -58,7 +58,7 @@ mapping:
   keyframe_culling_enabled: true
   keyframe_culling_every_n_kf: 5          # check for redundant keyframes every N inserted keyframes
   keyframe_culling_min_observers: 3       # a point counts as "redundant" if >= this many OTHER keyframes also see it
-  keyframe_culling_redundancy_ratio: 0.75 # cull a keyframe once this fraction of its points are redundant
+  keyframe_culling_redundancy_ratio: 0.75  # cull a keyframe once this fraction of its points are redundant
 
 retrieval:
   enabled: true               # compute DINOv2 global descriptors per keyframe, for loop closure / relocalization
@@ -79,4 +79,4 @@ loop_closure:
   pending_timeout_kf: 40         # drop a pending (unconfirmed) candidate if not reconfirmed within this many keyframe-ids
 
 output:
-  map_dir: /home/danny/slam_ws/results/mh03_map
+  map_dir: /home/danny/slam_ws/results/mh04_imu_map

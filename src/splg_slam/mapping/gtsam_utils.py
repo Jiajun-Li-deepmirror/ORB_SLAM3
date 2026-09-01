@@ -17,6 +17,13 @@ def gtsam_pose_to_cw(pose: Pose3) -> np.ndarray:
     return invert_pose(pose.matrix())
 
 
+def pose_cw_to_body_gtsam(pose_cw: np.ndarray, t_cam_from_body: np.ndarray) -> Pose3:
+    """Composes a camera pose_cw with the fixed cam<-body extrinsic to get the body/IMU
+    pose, in gtsam's body->world convention (same convention pose_cw_to_gtsam uses for the
+    camera)."""
+    return pose_cw_to_gtsam(pose_cw).compose(matrix_to_gtsam_pose3(t_cam_from_body))
+
+
 def confidence_scaled_sigma(
     base_sigma: float, num_inliers: int, min_inliers: int, floor_scale: float = 0.3
 ) -> float:

@@ -1,5 +1,5 @@
 dataset:
-  mav0_dir: /home/danny/slam_ws/datasets/machine_hall/MH_03_medium/mav0
+  mav0_dir: /home/danny/slam_ws/datasets/machine_hall/MH_01_easy/mav0
   frame_stride: 1        # process every Nth stereo pair
   max_frames: null        # null = process all available frames
 
@@ -13,7 +13,7 @@ stereo:
   max_depth_m: 20.0        # discard stereo depth beyond this range (baseline/fx makes far depth noisy)
 
 imu:
-  enabled: false          # opt-in tight IMU fusion (CombinedImuFactor in local/global BA); vision-only when false
+  enabled: true           # opt-in tight IMU fusion (CombinedImuFactor in local/global BA); vision-only when false
   integration_sigma: 1.0e-4
   gravity_norm: 9.81007
   init_static_samples: 200   # ~1s @ 200Hz, leading samples averaged for gravity-alignment bootstrap
@@ -79,4 +79,4 @@ loop_closure:
   pending_timeout_kf: 40         # drop a pending (unconfirmed) candidate if not reconfirmed within this many keyframe-ids
 
 output:
-  map_dir: /home/danny/slam_ws/results/mh03_map
+  map_dir: /home/danny/slam_ws/results/mh01_imu_map

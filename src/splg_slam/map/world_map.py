@@ -16,12 +16,16 @@ class WorldMap:
         self.map_points: dict[int, MapPoint] = {}
         self.covisibility: dict[int, dict[int, int]] = defaultdict(dict)
         self.loop_edges: list[tuple[int, int, np.ndarray, int]] = []  # (kf_a, kf_b, rel, num_inliers)
+        self.imu_factors: list[tuple[int, int, np.ndarray]] = []  # (kf_a, kf_b, Nx7 [t_s,wx,wy,wz,ax,ay,az])
         self.point_probation: dict[int, int] = {}  # point_id -> keyframe count at creation
         self.frame_processing_times_s: list[float] = []  # per-input-frame wall-clock time (seconds)
         self._next_point_id = 0
 
     def add_loop_edge(self, kf_id_a: int, kf_id_b: int, relative_pose_a_from_b: np.ndarray, num_inliers: int) -> None:
         self.loop_edges.append((kf_id_a, kf_id_b, relative_pose_a_from_b, num_inliers))
+
+    def add_imu_factor(self, kf_id_a: int, kf_id_b: int, samples: np.ndarray) -> None:
+        self.imu_factors.append((kf_id_a, kf_id_b, samples))
 
     def add_keyframe(self, kf: KeyFrame) -> None:
         self.keyframes[kf.frame_id] = kf

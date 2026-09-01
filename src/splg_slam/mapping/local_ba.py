@@ -4,15 +4,18 @@ from gtsam import (
     BetweenFactorPose3,
     Cal3_S2,
     Cal3_S2Stereo,
+    CombinedImuFactor,
     GenericProjectionFactorCal3_S2,
     GenericStereoFactor3D,
     Point2,
     Point3,
+    PriorFactorConstantBias,
     PriorFactorPose3,
+    PriorFactorVector,
     StereoPoint2,
     Values,
 )
-from gtsam.symbol_shorthand import L, X
+from gtsam.symbol_shorthand import B, L, V, X
 
 from splg_slam.geometry.pose_utils import camera_center
 from splg_slam.map.world_map import WorldMap
@@ -20,8 +23,20 @@ from splg_slam.mapping.gtsam_utils import (
     confidence_scaled_sigma,
     gtsam_pose_to_cw,
     matrix_to_gtsam_pose3,
+    pose_cw_to_body_gtsam,
     pose_cw_to_gtsam,
 )
+from splg_slam.mapping.imu_preintegration import bias_from_vector, preintegrate
+
+# gtsam.symbol_shorthand.Y isn't a builtin shorthand - build one for the IMU body pose,
+# kept distinct from X() (camera pose) since GenericStereoFactor3D has no body_P_sensor
+# support in this GTSAM build (GenericProjectionFactorCal3_S2 does), so X() must keep
+# meaning "camera pose" everywhere the stereo factor is used.
+from gtsam import Symbol as _Symbol
+
+
+def Y(j: int) -> int:
+    return _Symbol("y", j).key()
 
 
 def local_bundle_adjustment(
@@ -38,6 +53,9 @@ def local_bundle_adjustment(
     min_depth: float = 0.05,
     max_pose_shift_m: float = 10.0,
     outlier_reproj_threshold_px: float = 5.0,
+    imu_factors: list[tuple[int, int, np.ndarray]] | None = None,
+    imu_calib=None,
+    imu_params=None,
 ) -> dict:
     """Refines poses of `keyframe_ids` ("free") and positions of the map points they
     observe via GTSAM Levenberg-Marquardt. Updates world_map in place. Points seen by a
@@ -89,7 +107,15 @@ def local_bundle_adjustment(
     error is still above `outlier_reproj_threshold_px` is dropped from its point (the
     point itself survives if other observations still support it) - Huber down-weights
     outliers during the solve but never removes them, so a persistently bad correspondence
-    keeps quietly dragging on every future optimization unless it's pruned here."""
+    keeps quietly dragging on every future optimization unless it's pruned here.
+
+    Pass `imu_factors` (world_map.imu_factors), `imu_calib`, and `imu_params` (a
+    gtsam.PreintegrationCombinedParams) to fold CombinedImuFactor constraints into the
+    same graph for any (kf_a, kf_b) pair where both ends are already touched by a visual
+    factor above. Since GenericStereoFactor3D has no body_P_sensor support in this GTSAM
+    build, X(kf_id) keeps meaning camera pose everywhere (stereo/mono factors unchanged);
+    IMU states live on a separate Y(kf_id) body-pose symbol, rigidly tied to X(kf_id) via
+    a tight BetweenFactorPose3 using the known camera<-body extrinsic."""
     calib = Cal3_S2(k_rect[0, 0], k_rect[1, 1], 0.0, k_rect[0, 2], k_rect[1, 2])
     free_kf_ids = set(keyframe_ids)
 
@@ -185,6 +211,46 @@ def local_bundle_adjustment(
         anchor_kf_id = min(free_touched)
         graph.add(PriorFactorPose3(X(anchor_kf_id), initial.atPose3(X(anchor_kf_id)), fixed_prior_noise))
 
+    imu_touched: set[int] = set()
+    if imu_factors and imu_params is not None and imu_calib is not None:
+        tight_vel_noise = gtsam.noiseModel.Isotropic.Sigma(3, 1e-6)
+        tight_bias_noise = gtsam.noiseModel.Diagonal.Sigmas(np.full(6, 1e-6))
+        extrinsic_pose = matrix_to_gtsam_pose3(imu_calib.T_cam0_body)
+
+        def _ensure_imu_state(kf_id: int) -> None:
+            if kf_id in imu_touched:
+                return
+            imu_touched.add(kf_id)
+            kf = world_map.keyframes[kf_id]
+            initial.insert(Y(kf_id), pose_cw_to_body_gtsam(kf.pose_cw, imu_calib.T_cam0_body))
+            initial.insert(V(kf_id), kf.velocity if kf.velocity is not None else np.zeros(3))
+            initial.insert(B(kf_id), bias_from_vector(kf.imu_bias))
+            graph.add(BetweenFactorPose3(X(kf_id), Y(kf_id), extrinsic_pose, fixed_prior_noise))
+            if kf_id in fixed_touched:
+                graph.add(PriorFactorVector(V(kf_id), initial.atVector(V(kf_id)), tight_vel_noise))
+                graph.add(PriorFactorConstantBias(B(kf_id), initial.atConstantBias(B(kf_id)), tight_bias_noise))
+
+        for kf_a, kf_b, samples in imu_factors:
+            if kf_a not in world_map.keyframes or kf_b not in world_map.keyframes:
+                continue  # one end was since culled (redundant-keyframe removal)
+            if kf_a not in (free_touched | fixed_touched) or kf_b not in (free_touched | fixed_touched):
+                continue
+            bias_ref = bias_from_vector(world_map.keyframes[kf_a].imu_bias)
+            preint = preintegrate(samples, bias_ref, imu_params)
+            _ensure_imu_state(kf_a)
+            _ensure_imu_state(kf_b)
+            graph.add(CombinedImuFactor(Y(kf_a), V(kf_a), Y(kf_b), V(kf_b), B(kf_a), B(kf_b), preint))
+
+        if imu_touched:
+            # Gauge-fix velocity/bias the same way the pose graph is gauge-fixed above -
+            # pin one state's initial estimate, unless a boundary keyframe already pinned one.
+            anchor_imu_id = min(imu_touched)
+            if anchor_imu_id not in fixed_touched:
+                graph.add(PriorFactorVector(V(anchor_imu_id), initial.atVector(V(anchor_imu_id)), tight_vel_noise))
+                graph.add(
+                    PriorFactorConstantBias(B(anchor_imu_id), initial.atConstantBias(B(anchor_imu_id)), tight_bias_noise)
+                )
+
     optimizer = gtsam.LevenbergMarquardtOptimizer(graph, initial, gtsam.LevenbergMarquardtParams())
     initial_error = graph.error(initial)
     result = optimizer.optimize()
@@ -207,6 +273,9 @@ def local_bundle_adjustment(
         world_map.keyframes[kf_id].pose_cw = pose_cw
     for pid in valid_obs:
         world_map.map_points[pid].position = np.array(result.atPoint3(L(pid)))
+    for kf_id in imu_touched:
+        world_map.keyframes[kf_id].velocity = np.array(result.atVector(V(kf_id)))
+        world_map.keyframes[kf_id].imu_bias = np.array(result.atConstantBias(B(kf_id)).vector())
 
     all_poses = {kf_id: world_map.keyframes[kf_id].pose_cw for kf_id in (free_touched | fixed_touched)}
     n_outliers_removed = 0
@@ -234,6 +303,7 @@ def local_bundle_adjustment(
         "num_points": len(valid_obs),
         "num_skipped_cheirality": n_skipped_cheirality,
         "num_outliers_removed": n_outliers_removed,
+        "num_imu_states": len(imu_touched),
         "initial_error": float(initial_error),
         "final_error": float(graph.error(result)),
         "rejected": False,

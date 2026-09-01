@@ -12,6 +12,17 @@ stereo:
   block_size: 5
   max_depth_m: 20.0        # discard stereo depth beyond this range (baseline/fx makes far depth noisy)
 
+imu:
+  enabled: false          # opt-in tight IMU fusion (CombinedImuFactor in local/global BA); vision-only when false
+  integration_sigma: 1.0e-4
+  gravity_norm: 9.81007
+  init_static_samples: 200   # ~1s @ 200Hz, leading samples averaged for gravity-alignment bootstrap
+  init_gyro_static_threshold: 0.05   # rad/s; leading-window mean gyro magnitude below this -> static init, else dynamic (ORB-SLAM-style motion-based) init
+  init_dynamic_window_kf: 10         # keyframes to collect (vision + IMU) before solving the dynamic init closed-form system
+  reinit_min_kf: 20           # first periodic re-init check, once this many keyframes exist
+  reinit_check_every_kf: 15   # re-check every N keyframes after that (not a fixed one-shot window)
+  reinit_gravity_tolerance: 0.08  # relative |g| error a re-init estimate must beat to be accepted (self-check vs the known 9.81 constant, no ground truth needed)
+
 tracking:
   min_inlier_matches: 30
   pnp_reproj_threshold_px: 3.0

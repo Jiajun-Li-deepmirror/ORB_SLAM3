@@ -12,6 +12,7 @@ class Frame:
     depths: np.ndarray  # N, stereo depth in meters, NaN where invalid
     pose_cw: np.ndarray | None = None  # 4x4, world -> camera; None until estimated
     map_point_ids: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int64))
+    velocity: np.ndarray | None = None  # 3, world-frame body linear velocity (IMU fusion only)
 
     def __post_init__(self):
         if self.map_point_ids.size == 0 and len(self.keypoints) > 0:

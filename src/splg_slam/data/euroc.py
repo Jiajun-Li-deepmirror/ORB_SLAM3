@@ -65,6 +65,50 @@ def _read_data_csv(path: Path) -> list[tuple[int, str]]:
     return entries
 
 
+@dataclass
+class ImuCalibration:
+    gyro_noise_density: float  # rad/s/sqrt(Hz)
+    gyro_random_walk: float  # rad/s^2/sqrt(Hz)
+    accel_noise_density: float  # m/s^2/sqrt(Hz)
+    accel_random_walk: float  # m/s^3/sqrt(Hz)
+    rate_hz: float
+    T_cam0_body: np.ndarray  # 4x4, maps points from body/IMU frame into the cam0 frame
+
+
+def load_imu_calibration(mav0_dir: Path) -> ImuCalibration:
+    mav0_dir = Path(mav0_dir)
+    y_imu = _load_sensor_yaml(mav0_dir / "imu0" / "sensor.yaml")
+    y_cam0 = _load_sensor_yaml(mav0_dir / "cam0" / "sensor.yaml")
+
+    # T_BS is "sensor frame -> body frame" for every EuRoC sensor.yaml. The IMU defines the
+    # body frame (T_BS is identity there), so cam0's own T_BS is already T_body_cam0, and its
+    # inverse is what GTSAM's IMU factors need: T_cam0_body (body points expressed in cam0).
+    t_body_cam0 = _t_bs_to_matrix(y_cam0)
+    t_cam0_body = np.linalg.inv(t_body_cam0)
+
+    return ImuCalibration(
+        gyro_noise_density=float(y_imu["gyroscope_noise_density"]),
+        gyro_random_walk=float(y_imu["gyroscope_random_walk"]),
+        accel_noise_density=float(y_imu["accelerometer_noise_density"]),
+        accel_random_walk=float(y_imu["accelerometer_random_walk"]),
+        rate_hz=float(y_imu["rate_hz"]),
+        T_cam0_body=t_cam0_body,
+    )
+
+
+def load_imu_measurements(mav0_dir: Path) -> np.ndarray:
+    """Returns an Nx7 float64 array [timestamp_ns, wx, wy, wz, ax, ay, az], sorted by time."""
+    mav0_dir = Path(mav0_dir)
+    rows = []
+    with open(mav0_dir / "imu0" / "data.csv") as f:
+        for row in csv.reader(f):
+            if not row or row[0].startswith("#"):
+                continue
+            rows.append([float(x) for x in row[:7]])
+    measurements = np.array(rows, dtype=np.float64)
+    return measurements[np.argsort(measurements[:, 0])]
+
+
 def load_stereo_frames(mav0_dir: Path) -> list[StereoFrameEntry]:
     """EuRoC guarantees cam0/cam1 are hardware-synced with identical timestamps."""
     mav0_dir = Path(mav0_dir)

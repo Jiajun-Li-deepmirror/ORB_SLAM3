@@ -1,6 +1,8 @@
 import cv2
+import gtsam
 import numpy as np
 
+from splg_slam.data.euroc import ImuCalibration
 from splg_slam.features.splg import SPLG
 from splg_slam.geometry.pnp import solve_pnp_ransac
 from splg_slam.geometry.pose_utils import pose_delta
@@ -9,6 +11,14 @@ from splg_slam.localization.retrieval import GlobalDescriptorIndex
 from splg_slam.map.frame import Frame
 from splg_slam.map.keyframe import KeyFrame
 from splg_slam.map.world_map import WorldMap
+from splg_slam.mapping.gtsam_utils import pose_cw_to_body_gtsam
+from splg_slam.mapping.imu_init import choose_imu_init_mode
+from splg_slam.mapping.imu_preintegration import (
+    bias_from_vector,
+    gravity_alignment_rotation,
+    make_preintegration_params,
+    preintegrate,
+)
 from splg_slam.mapping.local_map import gather_local_map_point_ids, search_local_map
 
 
@@ -24,7 +34,10 @@ class OfflineMapper:
     viewpoint has drifted too far to ever re-match directly, instead of just hoping the
     next frame happens to land somewhere matchable."""
 
-    def __init__(self, cfg, rectifier: StereoRectifier, global_extractor=None):
+    def __init__(
+        self, cfg, rectifier: StereoRectifier, global_extractor=None,
+        imu_measurements: np.ndarray | None = None, imu_calib: ImuCalibration | None = None,
+    ):
         self.cfg = cfg
         self.rectifier = rectifier
         self.depth_est = StereoDepthEstimator(
@@ -48,6 +61,31 @@ class OfflineMapper:
         self.reloc_index = GlobalDescriptorIndex() if global_extractor is not None else None
         self._reloc_feats_cache: dict[int, dict] = {}
 
+        self.imu_enabled = bool(
+            getattr(cfg, "imu", None) and cfg.imu.enabled and imu_measurements is not None and imu_calib is not None
+        )
+        self.imu_measurements = imu_measurements
+        self.imu_calib = imu_calib
+        self._imu_params = (
+            make_preintegration_params(imu_calib, cfg.imu.gravity_norm, cfg.imu.integration_sigma)
+            if self.imu_enabled else None
+        )
+        self._imu_last_ts_ns: int | None = None
+        self._pending_imu_samples: list[np.ndarray] = []
+        self.imu_init_mode: str | None = None  # "static" | "dynamic", decided at bootstrap
+        self.imu_init_pending = False  # True while dynamic init still needs to run (see build_map.py)
+
+    def _pull_imu_samples(self, timestamp_ns: int) -> None:
+        if self._imu_last_ts_ns is None:
+            self._imu_last_ts_ns = timestamp_ns
+            return
+        ts_col = self.imu_measurements[:, 0]
+        start = np.searchsorted(ts_col, self._imu_last_ts_ns, side="right")
+        end = np.searchsorted(ts_col, timestamp_ns, side="right")
+        if end > start:
+            self._pending_imu_samples.append(self.imu_measurements[start:end])
+        self._imu_last_ts_ns = timestamp_ns
+
     def process_stereo_pair(self, img_left: np.ndarray, img_right: np.ndarray,
                              timestamp_ns: int, image_path: str | None = None):
         """Returns (frame_or_keyframe, is_keyframe). frame_or_keyframe is None if tracking failed."""
@@ -63,11 +101,37 @@ class OfflineMapper:
         frame_id = self._next_frame_id
         self._next_frame_id += 1
 
+        if self.imu_enabled:
+            self._pull_imu_samples(timestamp_ns)
+
         if self.ref_keyframe is None:
+            pose_cw0 = np.eye(4)
+            if self.imu_enabled:
+                # World frame is defined by this bootstrap keyframe, so its orientation
+                # fixes gravity's direction in world frame for every later IMU factor.
+                # EuRoC sequences are typically handled/moved before takeoff (not static),
+                # so check the actual leading IMU data instead of assuming either case.
+                self.imu_init_mode, accel_samples = choose_imu_init_mode(
+                    self.imu_measurements, self.cfg.imu.init_static_samples,
+                    search_samples=10 * self.cfg.imu.init_static_samples,
+                    gyro_static_threshold=self.cfg.imu.init_gyro_static_threshold,
+                )
+                if self.imu_init_mode == "static":
+                    r_world_body0 = gravity_alignment_rotation(accel_samples)
+                    r_cam0_body = self.imu_calib.T_cam0_body[:3, :3]
+                    pose_cw0[:3, :3] = r_cam0_body @ r_world_body0.T
+                else:
+                    # Motion-based (ORB-SLAM-style) init: bootstrap at an arbitrary,
+                    # gravity-unaware orientation and let run_dynamic_imu_init (called from
+                    # build_map.py once enough keyframes/IMU data have accumulated) solve
+                    # gyro bias + gravity + velocities and retroactively re-align everything.
+                    self.imu_init_pending = True
             kf = KeyFrame(
                 frame_id=frame_id, timestamp_ns=timestamp_ns,
                 keypoints=kpts, descriptors=desc, depths=depths,
-                pose_cw=np.eye(4), image_path=str(image_path) if image_path else None,
+                pose_cw=pose_cw0, image_path=str(image_path) if image_path else None,
+                velocity=np.zeros(3) if self.imu_enabled else None,
+                imu_bias=np.zeros(6) if self.imu_enabled else None,
             )
             self._insert_keyframe(kf, feats, rect_l)
             self.last_frame = kf
@@ -168,6 +232,20 @@ class OfflineMapper:
         return kf, True
 
     def _insert_keyframe(self, kf: KeyFrame, feats: dict, rect_left_img: np.ndarray) -> None:
+        if self.imu_enabled and self.ref_keyframe is not None and self._pending_imu_samples:
+            samples = np.concatenate(self._pending_imu_samples, axis=0)
+            prev_bias_vec = self.ref_keyframe.imu_bias
+            prev_bias = bias_from_vector(prev_bias_vec)
+            preint = preintegrate(samples, prev_bias, self._imu_params)
+            prev_body_pose = pose_cw_to_body_gtsam(self.ref_keyframe.pose_cw, self.imu_calib.T_cam0_body)
+            prev_velocity = self.ref_keyframe.velocity if self.ref_keyframe.velocity is not None else np.zeros(3)
+            prev_state = gtsam.NavState(prev_body_pose, prev_velocity)
+            predicted = preint.predict(prev_state, prev_bias)
+            kf.velocity = predicted.velocity()
+            kf.imu_bias = prev_bias_vec if prev_bias_vec is not None else np.zeros(6)
+            self.world_map.add_imu_factor(self.ref_keyframe.frame_id, kf.frame_id, samples)
+        self._pending_imu_samples = []
+
         if self.global_extractor is not None:
             kf.global_descriptor = self.global_extractor.extract(rect_left_img)
 
@@ -258,6 +336,17 @@ class OfflineMapper:
 
         cand_kf, cand_feats, _n_inliers, pose_cw = reloc
         self.n_relocalizations += 1
+        if self.imu_enabled:
+            # cand_kf is not temporally adjacent to the old ref_keyframe (reloc jumps
+            # non-locally in the map) - the interval we were accumulating no longer
+            # corresponds to a real between-keyframe motion, so it can't become a factor.
+            self._pending_imu_samples = []
+            if cand_kf.imu_bias is None:
+                cand_kf.imu_bias = (
+                    self.ref_keyframe.imu_bias
+                    if self.ref_keyframe is not None and self.ref_keyframe.imu_bias is not None
+                    else np.zeros(6)
+                )
         frame = Frame(
             frame_id=frame_id, timestamp_ns=timestamp_ns,
             keypoints=kpts, descriptors=desc, depths=depths, pose_cw=pose_cw,
