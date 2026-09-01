@@ -26,6 +26,8 @@ tracking:
   max_pose_jump_deg: 90.0           # (a "valid" but physically implausible solve - e.g. a degenerate point config)
   relocalization_top_k: 5           # retrieval candidates tried when regular tracking fails outright
   relocalization_early_exit_inliers: 120  # stop trying more retrieval candidates once one PnP-verifies with this many inliers (comfortably above min_inlier_matches)
+  relocalization_max_keypoints: 512  # query-image SuperPoint cap for localization only; map-build keyframes keep features.max_keypoints (unchanged, so existing maps stay valid)
+  relocalization_fp16: true  # autocast fp16 for query-time SuperPoint/LightGlue/DINOv2 forward passes only
 
 mapping:
   # Periodic in-the-loop local BA: an earlier windows-only version (dropping every

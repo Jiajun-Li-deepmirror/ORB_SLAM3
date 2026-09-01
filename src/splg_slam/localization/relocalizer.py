@@ -18,8 +18,15 @@ class Relocalizer:
         self.world_map = world_map
         self.rectifier = rectifier
         self.cfg = cfg
-        self.splg = SPLG(max_keypoints=cfg.features.max_keypoints)
-        self.global_extractor = GlobalDescriptorExtractor()
+        # Query-side extraction only: candidate keyframes keep whatever keypoints the map
+        # was built with (features.max_keypoints), read straight from storage in
+        # _feats_for_keyframe. A smaller cap here only shrinks the per-query SuperPoint
+        # extraction and the query side of LightGlue's cross-attention, without touching
+        # the map itself (no rebuild needed, mapping-mode accuracy is unaffected).
+        query_max_keypoints = getattr(cfg.tracking, "relocalization_max_keypoints", cfg.features.max_keypoints)
+        use_fp16 = getattr(cfg.tracking, "relocalization_fp16", False)
+        self.splg = SPLG(max_keypoints=query_max_keypoints, use_fp16=use_fp16)
+        self.global_extractor = GlobalDescriptorExtractor(use_fp16=use_fp16)
         self.index = GlobalDescriptorIndex()
         self.index.build(world_map)
         self._kf_feats_cache: dict[int, dict] = {}
@@ -28,6 +35,17 @@ class Relocalizer:
         # rather than stored per-keyframe.
         h, w = self.rectifier.map_l[0].shape
         self._image_size = torch.tensor([[float(w), float(h)]], device=self.splg.device)
+        self._warmup(h, w)
+
+    def _warmup(self, h: int, w: int) -> None:
+        """Runs one dummy forward pass through every model (SuperPoint, LightGlue, DINOv2)
+        at construction time. CUDA kernel selection/compilation and cuDNN autotuning happen
+        on a model's first real invocation regardless of input content, costing ~400ms; doing
+        that here means the cost lands once at startup instead of on an arbitrary query."""
+        dummy_img = np.zeros((h, w), dtype=np.uint8)
+        feats = self.splg.extract(dummy_img)
+        self.splg.match(feats, feats)
+        self.global_extractor.extract(dummy_img)
 
     def _feats_for_keyframe(self, kf_id: int) -> dict:
         """Builds a LightGlue-ready feature dict straight from the keyframe's stored

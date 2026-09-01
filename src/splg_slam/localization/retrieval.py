@@ -24,9 +24,10 @@ class GlobalDescriptorExtractor:
     """DINOv2 (ViT-S/14) CLS-token embedding, used as a compact whole-image descriptor
     for loop-closure / relocalization candidate retrieval in medium-to-large scenes."""
 
-    def __init__(self, device: torch.device | None = None):
+    def __init__(self, device: torch.device | None = None, use_fp16: bool = False):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = _load_dinov2_vits14().eval().to(self.device)
+        self.use_fp16 = use_fp16 and self.device.type == "cuda"
         self.transform = T.Compose([
             T.ToTensor(),
             T.Resize(224, antialias=True),
@@ -38,7 +39,8 @@ class GlobalDescriptorExtractor:
     def extract(self, img: np.ndarray) -> np.ndarray:
         img_rgb = np.stack([img] * 3, axis=-1) if img.ndim == 2 else img
         tensor = self.transform(img_rgb).unsqueeze(0).to(self.device)
-        feat = self.model(tensor).cpu().numpy()[0]
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.use_fp16):
+            feat = self.model(tensor).float().cpu().numpy()[0]
         return feat / (np.linalg.norm(feat) + 1e-9)
 
 

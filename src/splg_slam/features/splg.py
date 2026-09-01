@@ -15,24 +15,31 @@ def image_to_tensor(img: np.ndarray, device: torch.device) -> torch.Tensor:
 class SPLG:
     """SuperPoint feature extraction + LightGlue matching, wrapped for the SLAM pipeline."""
 
-    def __init__(self, max_keypoints: int = 1024, device: torch.device | None = None):
+    def __init__(self, max_keypoints: int = 1024, device: torch.device | None = None, use_fp16: bool = False):
         from lightglue import LightGlue, SuperPoint
 
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.extractor = SuperPoint(max_num_keypoints=max_keypoints).eval().to(self.device)
         self.matcher = LightGlue(features="superpoint").eval().to(self.device)
+        # Autocast, not .half() weights: keeps mapping-time callers (which never pass this)
+        # at full fp32 precision/behavior untouched, and autocast lets ops that are numerically
+        # sensitive (e.g. softmax in attention) stay in fp32 internally even under the context.
+        self.use_fp16 = use_fp16 and self.device.type == "cuda"
 
     @torch.no_grad()
     def extract(self, img: np.ndarray) -> dict:
         """Returns the batched (dim-0 size 1) feature dict LightGlue expects as input."""
         tensor = image_to_tensor(img, self.device)
-        return self.extractor.extract(tensor)
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.use_fp16):
+            feats = self.extractor.extract(tensor)
+        return {k: v.float() if torch.is_tensor(v) and v.is_floating_point() else v for k, v in feats.items()}
 
     @torch.no_grad()
     def match(self, feats0: dict, feats1: dict) -> dict:
         from lightglue.utils import rbd
 
-        matches01 = self.matcher({"image0": feats0, "image1": feats1})
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.use_fp16):
+            matches01 = self.matcher({"image0": feats0, "image1": feats1})
         f0, f1, m01 = rbd(feats0), rbd(feats1), rbd(matches01)
 
         matches = m01["matches"].cpu().numpy()  # Mx2 indices into kpts0/kpts1
