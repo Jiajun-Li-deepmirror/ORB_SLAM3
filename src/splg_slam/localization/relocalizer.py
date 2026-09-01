@@ -35,6 +35,12 @@ class Relocalizer:
         # rather than stored per-keyframe.
         h, w = self.rectifier.map_l[0].shape
         self._image_size = torch.tensor([[float(w), float(h)]], device=self.splg.device)
+        # Tried running SuperPoint extraction and the DINOv2 global descriptor on separate
+        # CUDA streams here (they're independent - both only depend on the raw query image),
+        # hoping to overlap them on the GPU. Results were bit-identical (correct) but no
+        # faster, sometimes marginally slower: this GPU has no spare capacity to run both
+        # concurrently at this size, so the extra stream-sync bookkeeping was pure overhead.
+        # Reverted.
         self._warmup(h, w)
 
     def _warmup(self, h: int, w: int) -> None:
