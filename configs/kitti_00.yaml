@@ -1,0 +1,70 @@
+dataset:
+  kind: kitti
+  sequence_dir: /home/danny/slam_ws/datasets/data_odometry_gray/dataset/sequences/00
+  frame_stride: 1        # process every Nth stereo pair
+  max_frames: null        # full sequence (4541 frames); smoke-tested first at 800 frames, verified working
+
+features:
+  max_keypoints: 1024
+
+stereo:
+  min_disp: 0
+  num_disp: 128
+  block_size: 5
+  max_depth_m: 40.0        # KITTI's ~0.54m baseline (vs EuRoC's ~0.11m) gives usable depth much farther out
+
+imu:
+  enabled: false          # this KITTI odometry (gray) release has no IMU/OXTS stream
+
+tracking:
+  min_inlier_matches: 30
+  pnp_reproj_threshold_px: 3.0
+  keyframe_translation_m: 1.0     # at ~10Hz capture and typical driving speed, 0.5m made nearly every frame a keyframe (~92%) - raised to cut redundant near-identical keyframes and the graph size that comes with them
+  keyframe_rotation_deg: 8.0
+  keyframe_min_tracked_ratio: 0.3
+  local_map_window_size: 8
+  local_map_radius_px: 6.0
+  local_map_desc_threshold: 0.8
+  local_map_min_shared: 15
+  max_pose_jump_m: 8.0              # KITTI is a car (faster inter-frame motion than the EuRoC drone)
+  max_pose_jump_deg: 90.0
+  relocalization_top_k: 5
+  relocalization_early_exit_inliers: 120
+  relocalization_max_keypoints: 512
+  relocalization_fp16: true
+
+mapping:
+  periodic_local_ba_enabled: true
+  local_ba_every_n_kf: 3
+  local_ba_window_size: 10
+  local_ba_min_shared: 15
+  point_probation_kf: 5
+  point_min_observations: 2
+  final_global_ba: true
+  stereo_ba_enabled: true
+  keyframe_culling_enabled: true
+  keyframe_culling_every_n_kf: 5
+  keyframe_culling_min_observers: 3
+  keyframe_culling_redundancy_ratio: 0.75
+
+retrieval:
+  enabled: true
+
+loop_closure:
+  enabled: true
+  fusion_enabled: true
+  every_n_kf: 5
+  min_id_gap: 30
+  top_k: 3
+  min_similarity: 0.5
+  min_inliers: 60
+  min_inlier_ratio: 0.3
+  max_consistency_trans_m: 2.5   # floor - always allowed regardless of arc length (matches EuRoC's default, preserved for short revisits)
+  max_consistency_trans_ratio: 0.02  # additionally allow 2% of the traveled arc length since the candidate - a multi-km outdoor loop accumulates real drift a fixed few-meter tolerance can't account for
+  max_consistency_rot_deg: 25.0
+  required_confirmations: 2
+  group_radius_kf: 20
+  pending_timeout_kf: 40
+
+output:
+  map_dir: /home/danny/slam_ws/results/kitti00_map

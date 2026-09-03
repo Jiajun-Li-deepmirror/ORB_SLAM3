@@ -9,7 +9,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from splg_slam.config import load_config
-from splg_slam.data.euroc import load_imu_calibration, load_imu_measurements, load_stereo_frames, load_stereo_rig
+from splg_slam.data.euroc import load_imu_calibration, load_imu_measurements
+from splg_slam.data.loader import dataset_dir, dataset_module
 from splg_slam.geometry.stereo import StereoRectifier
 from splg_slam.localization.retrieval import GlobalDescriptorExtractor, GlobalDescriptorIndex
 from splg_slam.map.io import save_map
@@ -22,7 +23,12 @@ from splg_slam.mapping.loop_closure import (
     fuse_loop_matches,
     verify_loop_candidate,
 )
-from splg_slam.mapping.pose_graph import optimize_pose_graph, relative_pose, relative_pose_discrepancy
+from splg_slam.mapping.pose_graph import (
+    odometry_arc_length_m,
+    optimize_pose_graph,
+    relative_pose,
+    relative_pose_discrepancy,
+)
 from splg_slam.mapping.tracker import OfflineMapper
 
 
@@ -33,7 +39,9 @@ def main():
 
     cfg = load_config(args.config)
 
-    rig = load_stereo_rig(cfg.dataset.mav0_dir)
+    dmod = dataset_module(cfg)
+    ddir = dataset_dir(cfg)
+    rig = dmod.load_stereo_rig(ddir)
     rectifier = StereoRectifier(rig)
     global_extractor = GlobalDescriptorExtractor() if getattr(cfg, "retrieval", None) and cfg.retrieval.enabled else None
     stereo_ba_baseline = rectifier.baseline if getattr(cfg.mapping, "stereo_ba_enabled", False) else None
@@ -57,7 +65,7 @@ def main():
     reinit_gravity_tolerance = getattr(cfg.imu, "reinit_gravity_tolerance", 0.08)
     best_reinit_gravity_error: float | None = None
 
-    entries = load_stereo_frames(cfg.dataset.mav0_dir)
+    entries = dmod.load_stereo_frames(ddir)
     stride = cfg.dataset.frame_stride or 1
     entries = entries[::stride]
     if cfg.dataset.max_frames:
@@ -99,10 +107,17 @@ def main():
                 just_reinitialized = False
 
                 if imu_enabled and mapper.imu_init_pending and n_keyframes >= cfg.imu.init_dynamic_window_kf:
-                    init_window = mapper.world_map.keyframe_ids_sorted()[: cfg.imu.init_dynamic_window_kf]
+                    # Use ALL keyframes so far, not a fixed [:init_dynamic_window_kf] slice: on
+                    # the first attempt (n_keyframes just crossed the threshold) this is the
+                    # same window as before, but if it fails (e.g. a reloc jump broke the
+                    # imu_factor chain inside that window) a fixed slice would retry with the
+                    # exact same input forever, deterministically failing every time and
+                    # silently disabling IMU for the whole run. Growing the window each retry
+                    # gives each subsequent attempt a real chance to route around the gap.
+                    init_window = mapper.world_map.keyframe_ids_sorted()
                     diag = run_dynamic_imu_init(mapper.world_map, init_window, imu_calib, imu_params, cfg.imu.gravity_norm)
                     if diag is None:
-                        print("  dynamic IMU init: IMU-factor chain incomplete so far, will retry later")
+                        print(f"  dynamic IMU init: IMU-factor chain incomplete over {len(init_window)} keyframes, will retry with more data later")
                     else:
                         mapper.imu_init_pending = False
                         just_reinitialized = True
@@ -209,11 +224,22 @@ def main():
                             mapper.world_map.keyframes[cand_id].pose_cw, mapper.world_map.keyframes[result.frame_id].pose_cw
                         )
                         trans_diff, rot_diff = relative_pose_discrepancy(rel, current_rel)
-                        if trans_diff > loop_cfg.max_consistency_trans_m or rot_diff > loop_cfg.max_consistency_rot_deg:
+                        # A fixed-meters tolerance is only sized right for one specific
+                        # trajectory scale (2.5m suits EuRoC's ~80m room-scale loops); scale
+                        # it up with the actual arc length traveled since the candidate, so a
+                        # multi-km outdoor loop gets a proportionally larger allowance for
+                        # genuine accumulated drift instead of vetoing every real closure.
+                        arc_length_m = odometry_arc_length_m(mapper.world_map, cand_id, result.frame_id)
+                        trans_tol = max(
+                            loop_cfg.max_consistency_trans_m,
+                            getattr(loop_cfg, "max_consistency_trans_ratio", 0.0) * arc_length_m,
+                        )
+                        if trans_diff > trans_tol or rot_diff > loop_cfg.max_consistency_rot_deg:
                             print(
                                 f"  loop candidate kf{result.frame_id} <-> kf{cand_id} rejected "
                                 f"(sim={sim:.3f}, inliers={n_inliers}): disagrees with odometry by "
-                                f"{trans_diff:.2f}m / {rot_diff:.1f}deg - likely perceptual aliasing"
+                                f"{trans_diff:.2f}m / {rot_diff:.1f}deg (tolerance {trans_tol:.2f}m over "
+                                f"{arc_length_m:.0f}m arc) - likely perceptual aliasing"
                             )
                             continue
 

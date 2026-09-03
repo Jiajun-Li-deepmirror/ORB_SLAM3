@@ -31,6 +31,25 @@ def relative_pose_discrepancy(rel_a: np.ndarray, rel_b: np.ndarray) -> tuple[flo
     return trans_diff, rot_diff_deg
 
 
+def odometry_arc_length_m(world_map: WorldMap, kf_id_a: int, kf_id_b: int) -> float:
+    """Total translated distance along the id-sorted keyframe chain between two keyframes -
+    a data-derived proxy for how much odometry drift could plausibly have accumulated
+    between them. Stereo VO drift is conventionally budgeted as a percentage of distance
+    traveled (this is exactly how KITTI's own official benchmark reports translational
+    error), not a fixed number of meters - a constant tolerance sized right for a ~80m
+    EuRoC room-scale trajectory is far too strict for a multi-km outdoor loop, and too loose
+    for a tabletop-scale one. Used to scale the loop-closure consistency-check tolerance."""
+    ids = world_map.keyframe_ids_sorted()
+    lo, hi = min(kf_id_a, kf_id_b), max(kf_id_a, kf_id_b)
+    chain = [k for k in ids if lo <= k <= hi]
+    total = 0.0
+    for a, b in zip(chain[:-1], chain[1:]):
+        ca = camera_center(world_map.keyframes[a].pose_cw)
+        cb = camera_center(world_map.keyframes[b].pose_cw)
+        total += float(np.linalg.norm(cb - ca))
+    return total
+
+
 def optimize_pose_graph(
     world_map: WorldMap,
     odom_trans_sigma: float = 0.05,

@@ -1,0 +1,82 @@
+dataset:
+  mav0_dir: /home/danny/slam_ws/datasets/machine_hall/MH_01_easy/mav0
+  frame_stride: 1        # process every Nth stereo pair
+  max_frames: null        # null = process all available frames
+
+features:
+  max_keypoints: 1024
+
+stereo:
+  min_disp: 0
+  num_disp: 128
+  block_size: 5
+  max_depth_m: 20.0        # discard stereo depth beyond this range (baseline/fx makes far depth noisy)
+
+imu:
+  enabled: false          # opt-in tight IMU fusion (CombinedImuFactor in local/global BA); vision-only when false
+  integration_sigma: 1.0e-4
+  gravity_norm: 9.81007
+  init_static_samples: 200   # ~1s @ 200Hz, leading samples averaged for gravity-alignment bootstrap
+  init_gyro_static_threshold: 0.05   # rad/s; leading-window mean gyro magnitude below this -> static init, else dynamic (ORB-SLAM-style motion-based) init
+  init_dynamic_window_kf: 10         # keyframes to collect (vision + IMU) before solving the dynamic init closed-form system
+  reinit_min_kf: 20           # first periodic re-init check, once this many keyframes exist
+  reinit_check_every_kf: 15   # re-check every N keyframes after that (not a fixed one-shot window)
+  reinit_gravity_tolerance: 0.08  # relative |g| error a re-init estimate must beat to be accepted (self-check vs the known 9.81 constant, no ground truth needed)
+
+tracking:
+  min_inlier_matches: 30
+  pnp_reproj_threshold_px: 3.0
+  keyframe_translation_m: 0.3
+  keyframe_rotation_deg: 8.0
+  keyframe_min_tracked_ratio: 0.3   # insert a new keyframe once tracked/visible ratio drops below this
+  local_map_window_size: 8          # number of covisible keyframes whose map points get projected for expanded matching
+  local_map_radius_px: 6.0          # search radius (px) around a projected map point
+  local_map_desc_threshold: 0.8     # min cosine similarity to accept a local-map descriptor match
+  local_map_min_shared: 15          # min shared map points for a keyframe to count as a covisibility neighbor
+  max_pose_jump_m: 5.0              # reject a PnP pose that jumps further than this from the reference keyframe
+  max_pose_jump_deg: 90.0           # (a "valid" but physically implausible solve - e.g. a degenerate point config)
+  relocalization_top_k: 5           # retrieval candidates tried when regular tracking fails outright
+  relocalization_early_exit_inliers: 120  # stop trying more retrieval candidates once one PnP-verifies with this many inliers (comfortably above min_inlier_matches)
+  relocalization_max_keypoints: 512  # query-image SuperPoint cap for localization only; map-build keyframes keep features.max_keypoints (unchanged, so existing maps stay valid)
+  relocalization_fp16: true  # autocast fp16 for query-time SuperPoint/LightGlue/DINOv2 forward passes only
+
+mapping:
+  # Periodic in-the-loop local BA: an earlier windows-only version (dropping every
+  # observation from keyframes outside the window) was weakly constrained enough to
+  # converge to degenerate solutions and made the map WORSE, not better (MH01 0.428m ->
+  # 0.039m, MH04 2.92m -> 0.382m RMSE, with it disabled). Now includes every other
+  # keyframe that shares a window point as a hard-fixed boundary variable (ORB-SLAM's
+  # local BA design), which fixed that and made it a net improvement again.
+  periodic_local_ba_enabled: false
+  local_ba_every_n_kf: 3     # run local BA every N inserted keyframes (only if enabled above)
+  local_ba_window_size: 10   # number of covisible keyframes included in each local BA
+  local_ba_min_shared: 15    # min shared map points for a keyframe to count as a covisibility neighbor
+  point_probation_kf: 5       # keyframes a new map point has to prove itself over before being trusted permanently
+  point_min_observations: 2   # min observations required to survive probation (0 disables culling)
+  final_global_ba: false       # after the whole sequence, run one BA over all keyframes+points+loop edges together
+  stereo_ba_enabled: false     # use true stereo (left+right) reprojection factors in BA where per-keypoint depth is valid, not just monocular
+  keyframe_culling_enabled: false
+  keyframe_culling_every_n_kf: 5          # check for redundant keyframes every N inserted keyframes
+  keyframe_culling_min_observers: 3       # a point counts as "redundant" if >= this many OTHER keyframes also see it
+  keyframe_culling_redundancy_ratio: 0.75 # cull a keyframe once this fraction of its points are redundant
+
+retrieval:
+  enabled: true               # compute DINOv2 global descriptors per keyframe, for loop closure / relocalization
+
+loop_closure:
+  enabled: false
+  fusion_enabled: false
+  every_n_kf: 5                # check for a loop every N inserted keyframes
+  min_id_gap: 30                # exclude candidates within this many keyframe-ids (avoids trivial local matches)
+  top_k: 3                      # retrieval candidates considered per check
+  min_similarity: 0.5           # min DINOv2 cosine similarity to consider a candidate
+  min_inliers: 60               # min PnP inliers to accept a loop (stricter than tracking's min_inlier_matches)
+  min_inlier_ratio: 0.3          # inliers must also be >= this fraction of attempted 2D-3D correspondences (0 = disabled)
+  max_consistency_trans_m: 2.5  # reject if loop-implied relative pose disagrees with odometry by more than this
+  max_consistency_rot_deg: 25.0 # (guards against perceptual aliasing: high-inlier but geometrically-wrong matches)
+  required_confirmations: 2     # a candidate area must be independently re-verified this many times before it's trusted
+  group_radius_kf: 20            # candidates within this many keyframe-ids of each other count as "the same area"
+  pending_timeout_kf: 40         # drop a pending (unconfirmed) candidate if not reconfirmed within this many keyframe-ids
+
+output:
+  map_dir: /home/danny/slam_ws/results/mh01_frontend_only_map
