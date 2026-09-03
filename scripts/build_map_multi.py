@@ -21,6 +21,7 @@ from splg_slam.mapping.loop_closure import (
 )
 from splg_slam.mapping.pose_graph import optimize_pose_graph, relative_pose, relative_pose_discrepancy
 from splg_slam.mapping.tracker import OfflineMapper
+from splg_slam.utils import set_global_seed
 
 # Approach B: instead of building 5 independent maps and registering them post-hoc (see
 # merge_maps_registration.py), feed all 5 sequences through ONE continuous OfflineMapper run,
@@ -39,8 +40,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("configs", type=str, nargs="+", help="configs to concatenate, in order (e.g. euroc_mh01.yaml euroc_mh02.yaml ...)")
     parser.add_argument("--out_dir", type=str, default="results/mh_multi_map")
+    parser.add_argument("--seed", type=int, default=0, help="seeds numpy/torch/cv2-RANSAC so repeated runs are reproducible instead of drifting via unseeded RANSAC and GPU-kernel nondeterminism")
     args = parser.parse_args()
 
+    set_global_seed(args.seed)
     configs = [load_config(c) for c in args.configs]
     base_cfg = configs[0]  # calibration/tracking/mapping params shared across the same physical rig
 

@@ -30,13 +30,16 @@ from splg_slam.mapping.pose_graph import (
     relative_pose_discrepancy,
 )
 from splg_slam.mapping.tracker import OfflineMapper
+from splg_slam.utils import set_global_seed
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", type=str)
+    parser.add_argument("--seed", type=int, default=0, help="seeds numpy/torch/cv2-RANSAC so repeated runs are reproducible instead of drifting via unseeded RANSAC and GPU-kernel nondeterminism")
     args = parser.parse_args()
 
+    set_global_seed(args.seed)
     cfg = load_config(args.config)
 
     dmod = dataset_module(cfg)
