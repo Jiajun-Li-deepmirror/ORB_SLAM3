@@ -1,3 +1,5 @@
+from collections import OrderedDict
+
 import numpy as np
 import torch
 
@@ -29,7 +31,13 @@ class Relocalizer:
         self.global_extractor = GlobalDescriptorExtractor(use_fp16=use_fp16)
         self.index = GlobalDescriptorIndex()
         self.index.build(world_map)
-        self._kf_feats_cache: dict[int, dict] = {}
+        # LRU-capped, not unbounded: each entry holds GPU tensors (keypoints/descriptors), so
+        # caching every distinct candidate keyframe ever touched over a long run on a large
+        # map (thousands of keyframes) grows without bound and can exhaust GPU memory. Cap
+        # size covers a comfortably large working set of "recently relevant" keyframes while
+        # bounding peak memory regardless of how many distinct keyframes the whole run visits.
+        self._kf_feats_cache_max_size = getattr(cfg.tracking, "relocalization_feats_cache_size", 500)
+        self._kf_feats_cache: OrderedDict[int, dict] = OrderedDict()
         # LightGlue only uses image_size to normalize keypoint coordinates; every keyframe
         # (and every query) is rectified to this same fixed size, so it's computed once here
         # rather than stored per-keyframe.
@@ -62,17 +70,29 @@ class Relocalizer:
         keypoints/descriptors (captured once at map-build time), instead of reloading the
         image and re-running SuperPoint on it - the map already has everything LightGlue's
         matcher needs (keypoints, descriptors, image_size)."""
-        if kf_id not in self._kf_feats_cache:
-            kf = self.world_map.keyframes[kf_id]
-            self._kf_feats_cache[kf_id] = {
-                "keypoints": torch.from_numpy(kf.keypoints).float()[None].to(self.splg.device),
-                "descriptors": torch.from_numpy(kf.descriptors).float()[None].to(self.splg.device),
-                "image_size": self._image_size,
-            }
-        return self._kf_feats_cache[kf_id]
+        if kf_id in self._kf_feats_cache:
+            self._kf_feats_cache.move_to_end(kf_id)  # mark as most-recently-used
+            return self._kf_feats_cache[kf_id]
 
-    def localize(self, rect_img_left: np.ndarray, top_k: int = 5) -> tuple[bool, np.ndarray | None, dict]:
-        query_feats = self.splg.extract(rect_img_left)
+        kf = self.world_map.keyframes[kf_id]
+        entry = {
+            "keypoints": torch.from_numpy(kf.keypoints).float()[None].to(self.splg.device),
+            "descriptors": torch.from_numpy(kf.descriptors).float()[None].to(self.splg.device),
+            "image_size": self._image_size,
+        }
+        self._kf_feats_cache[kf_id] = entry
+        if len(self._kf_feats_cache) > self._kf_feats_cache_max_size:
+            self._kf_feats_cache.popitem(last=False)  # evict least-recently-used
+        return entry
+
+    def localize(
+        self, rect_img_left: np.ndarray, top_k: int = 5, query_feats: dict | None = None,
+    ) -> tuple[bool, np.ndarray | None, dict]:
+        """`query_feats`: reuse an already-extracted SPLG feature dict (e.g. from a caller
+        that just tried frame-to-frame tracking with it and fell through here on failure)
+        instead of paying for a second SuperPoint pass over the same image."""
+        if query_feats is None:
+            query_feats = self.splg.extract(rect_img_left)
         kpts_q, _ = SPLG.to_frame_arrays(query_feats)
         query_global = self.global_extractor.extract(rect_img_left)
 

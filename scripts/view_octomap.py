@@ -286,16 +286,26 @@ function bindAttribs(buffer) {{
   gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, stride, 3 * 4);
 }}
 
+const SPEED_B64 = {speed_b64_json};
+const SPEED_MAX = {speed_max_json};
+
 let pathBuf = null, pathCount = 0, markerBuf = null;
 if (PATH_B64) {{
   const pathFlat = decodePoints(PATH_B64);
   const n = pathFlat.length / 3;
+  const speedArr = SPEED_B64 ? decodePoints(SPEED_B64) : null;
   const pv = new Float32Array(n * 6);
   for (let i = 0; i < n; i++) {{
     pv[i*6+0] = pathFlat[i*3] - cx;
     pv[i*6+1] = pathFlat[i*3+1] - cy;
     pv[i*6+2] = pathFlat[i*3+2] - cz;
-    pv[i*6+3] = 1.0; pv[i*6+4] = 0.85; pv[i*6+5] = 0.2; // amber flight path
+    if (speedArr) {{
+      const t = SPEED_MAX > 0 ? Math.min(Math.max(speedArr[i] / SPEED_MAX, 0), 1) : 0;
+      const [r,g,bl] = turbo(t);
+      pv[i*6+3] = r; pv[i*6+4] = g; pv[i*6+5] = bl; // colored by speed
+    }} else {{
+      pv[i*6+3] = 1.0; pv[i*6+4] = 0.85; pv[i*6+5] = 0.2; // amber flight path (no speed data)
+    }}
   }}
   pathBuf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, pathBuf);
@@ -310,9 +320,12 @@ if (PATH_B64) {{
   gl.bindBuffer(gl.ARRAY_BUFFER, markerBuf);
   gl.bufferData(gl.ARRAY_BUFFER, mv, gl.STATIC_DRAW);
 
+  const pathLegendLabel = speedArr
+    ? '<span style="color:#3730a3;">&mdash;</span> trajectory (color = speed, 0-' + SPEED_MAX.toFixed(1) + ' m/s)'
+    : '<span style="color:#ffd94d;">&mdash;</span> flight path';
   document.getElementById('legend').insertAdjacentHTML('beforeend',
     '<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-family:\'IBM Plex Mono\',monospace;font-size:10.5px;color:var(--text-dim);">' +
-    '<span style="color:#ffd94d;">&mdash;</span> flight path &nbsp; ' +
+    pathLegendLabel + ' &nbsp; ' +
     '<span style="color:#40eb73;">&#9679;</span> start &nbsp; ' +
     '<span style="color:#f24747;">&#9679;</span> goal</div>'
   );
@@ -455,15 +468,30 @@ def main():
     print(f"Using {len(occupied)} points after downsampling")
 
     path_b64_json = "null"
+    speed_b64_json = "null"
+    speed_max_json = "0"
     if args.path_npz:
-        path_world = np.load(args.path_npz)["path_world"].astype(np.float32)
+        npz = np.load(args.path_npz)
+        # Prefer the smoothed/speed-profiled trajectory (from the updated plan_path.py /
+        # plan_path_3d.py) over the raw A* voxel path, when both are present in the npz.
+        if "trajectory_xyz" in npz and "trajectory_v" in npz:
+            path_world = npz["trajectory_xyz"].astype(np.float32)
+            speed = npz["trajectory_v"].astype(np.float32)
+            speed_b64_json = f'"{base64.b64encode(speed.tobytes()).decode("ascii")}"'
+            speed_max_json = f"{float(speed.max()):.4f}" if len(speed) else "0"
+            print(f"Overlaying trajectory: {len(path_world)} samples, peak speed {speed.max():.2f} m/s, from {args.path_npz}")
+        else:
+            path_world = npz["path_world"].astype(np.float32)
+            print(f"Overlaying path: {len(path_world)} waypoints from {args.path_npz}")
         path_b64 = base64.b64encode(path_world.tobytes()).decode("ascii")
         path_b64_json = f'"{path_b64}"'
-        print(f"Overlaying path: {len(path_world)} waypoints from {args.path_npz}")
 
     b64 = base64.b64encode(occupied.astype(np.float32).tobytes()).decode("ascii")
     title = args.title or Path(args.octomap_path).stem
-    html = TEMPLATE.format(title=title, points_b64=b64, path_b64_json=path_b64_json)
+    html = TEMPLATE.format(
+        title=title, points_b64=b64, path_b64_json=path_b64_json,
+        speed_b64_json=speed_b64_json, speed_max_json=speed_max_json,
+    )
 
     Path(args.out_html).write_text(html)
     print(f"Saved {args.out_html} ({len(html) / 1e6:.1f} MB)")
