@@ -13,6 +13,12 @@ class Frame:
     pose_cw: np.ndarray | None = None  # 4x4, world -> camera; None until estimated
     map_point_ids: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int64))
     velocity: np.ndarray | None = None  # 3, world-frame body linear velocity (IMU fusion only)
+    # True if this keyframe's pose came from pure IMU-only prediction (tracking.
+    # continuous_imu_tracking) rather than a verified vision correspondence - i.e. tracking
+    # was "lost" by the usual vision-only definition, but kept going on IMU dead reckoning
+    # instead of cutting into a new Atlas segment. Not a verified pose the way a normal
+    # keyframe's is; kept for visualization and pose-graph sigma-scaling decisions.
+    imu_only: bool = False
 
     def __post_init__(self):
         if self.map_point_ids.size == 0 and len(self.keypoints) > 0:

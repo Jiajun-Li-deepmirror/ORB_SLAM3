@@ -79,7 +79,7 @@ def main():
 
     path_idx, total_dist_cells = astar_3d(
         checker, resolution, start_idx, goal_idx, origin, args.allow_unknown,
-        args.robot_radius_m, args.inflate_radius_m, args.cost_weight,
+        args.robot_radius_m, args.inflate_radius_m, args.cost_weight, bbx_min, bbx_max,
     )
     if path_idx is None:
         print("NO PATH FOUND")

@@ -1,0 +1,123 @@
+dataset:
+  kind: kitti
+  sequence_dir: /home/dm/slam_ws/datasets/kitti/dataset/sequences/07
+  frame_stride: 1
+  max_frames: null
+  use_sensor_depth: false
+  tf_static_from: null
+
+features:
+  max_keypoints: 1024        # SuperPoint keypoint cap per image
+
+dynamic_objects:
+  enabled: false              # DynamicVINS-style: drop keypoints landing on detected people
+  score_threshold: 0.6        # detector confidence threshold (PersonDetector default)
+  bbox_margin_px: 5           # padding around each detected box before dropping keypoints inside it
+
+stereo:
+  min_disp: 0
+  num_disp: 128
+  block_size: 5
+  max_depth_m: null            # null = auto-estimated: geometric ceiling (fx*baseline/3px) then rolling 90th-pct scene depth x1.2
+  depth_window_frames: 60      # rolling window size (frames) for the auto-estimation above
+  depth_recompute_every_frames: 30
+
+imu:
+  enabled: false               # no usable IMU stream for this dataset/loader
+  tight_fusion: false
+  integration_sigma: 1.0e-4
+  gravity_norm: 9.81007
+  init_static_samples: 200
+  init_gyro_static_threshold: 0.05
+  init_dynamic_window_kf: 10
+  t_cam0_body_override: null
+  accel_scale_correction: null
+  accel_scale_gyro_threshold: 0.2
+  accel_scale_wobble_tolerance: 0.4
+  reinit_min_kf: 20
+  reinit_check_every_kf: 15
+  reinit_window_kf: 100
+  reinit_gravity_tolerance: 0.08
+  reinit_max_rotation_deg: 5.0
+
+tracking:
+  mode: stereo
+  min_inlier_matches: 30
+  pnp_reproj_threshold_px: 3.0
+  keyframe_translation_m: 0.3              # mono/legacy geometric insertion rule (unused in stereo content-driven mode)
+  keyframe_rotation_deg: 8.0
+  keyframe_min_tracked_ratio: 0.3
+  keyframe_ref_ratio: 0.9                  # n_inliers < n_ref_matches*ratio triggers insertion; raised from ORB-SLAM3's 0.75 for LightGlue
+  keyframe_translation_fallback_m: null    # null = auto-estimated: scene median depth x tan(keyframe_fallback_parallax_deg)
+  keyframe_fallback_parallax_deg: 2.0
+  keyframe_rotation_fallback_deg: 0.0      # 0 = disabled
+  local_map_window_size: 8
+  local_map_min_shared: 15
+  local_map_radius_px: 6.0
+  local_map_desc_threshold: 0.8
+  max_pose_jump_m: null                    # null = auto-estimated from recent implied-tracking-speed distribution
+  pose_jump_min_floor_m: 0.5
+  speed_window_frames: 150
+  speed_min_samples: 20
+  speed_min_floor_mps: 1.0
+  max_pose_jump_deg: 90.0
+  relocalization_top_k: 5
+  relocalization_early_exit_inliers: 120
+  relocalization_feats_cache_size: 500
+  relocalization_max_keypoints: 1024       # = features.max_keypoints
+  mono_init_min_matches: 100
+  mono_init_min_parallax_deg: 1.5
+  mono_init_min_triangulated: 50
+  mono_init_assumed_depth_m: 10.0          # unused while mode=stereo; only matters for mono bootstrap
+  mono_min_parallax_deg: 1.0
+  mono_bootstrap_max_wait_frames: 60
+  mono_imu_scale_min_baseline_m: 0.05
+  motion_model_desc_threshold: 0.75
+  motion_model_debug: false
+  mono_debug_triangulation: false
+  reinit_after_lost_frames: 15
+  short_segment_discard_max_kf: 1
+  continuous_imu_tracking: false
+
+mapping:
+  periodic_local_ba_enabled: true
+  local_ba_every_n_kf: 3
+  local_ba_window_size: 10
+  local_ba_min_shared: 15
+  point_probation_kf: 5
+  point_min_observations: 2
+  final_global_ba: true
+  stereo_ba_enabled: true
+  keyframe_culling_enabled: true
+  keyframe_culling_every_n_kf: 5
+  keyframe_culling_min_observers: 3
+  keyframe_culling_window_size: 30
+  keyframe_culling_min_shared: 15
+  keyframe_culling_redundancy_ratio: 0.7   # unified across datasets per user request (KITTI-optimal was measured at 0.6, see tracker.py/build_map.py comments)
+  fallback_stitch_consistency_trans_tol_m: 0.3
+  fallback_stitch_consistency_rot_tol_deg: 10.0
+
+retrieval:
+  enabled: true
+
+loop_closure:
+  enabled: true
+  fusion_enabled: true
+  every_n_kf: 5
+  min_id_gap: 30
+  min_arc_length_m: null       # null = auto-estimated (~3x typical keyframe spacing)
+  top_k: 3
+  min_similarity: 0.5
+  min_inliers: 60
+  min_inlier_ratio: 0.0
+  max_consistency_trans_m: 2.5
+  max_consistency_rot_deg: 25.0
+  max_consistency_trans_ratio: 0.02
+  max_consistency_rot_ratio: 0.0
+  rigid_transform_arc_threshold_m: null
+  required_confirmations: 2
+  group_radius_kf: 20
+  pending_timeout_kf: 40
+
+output:
+  map_dir: /home/dm/slam_ws/results/kitti/kitti07_stereo

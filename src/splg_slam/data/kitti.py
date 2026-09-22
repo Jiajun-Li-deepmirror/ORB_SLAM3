@@ -3,7 +3,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from splg_slam.data.euroc import StereoFrameEntry, StereoRig
+from splg_slam.data.euroc import MonoFrameEntry, StereoFrameEntry, StereoRig
 from splg_slam.geometry.camera import PinholeCamera
 
 
@@ -41,6 +41,17 @@ def load_stereo_rig(sequence_dir: Path) -> StereoRig:
     return StereoRig(cam0=cam0, cam1=cam1, T_cam1_cam0=t_cam1_cam0)
 
 
+def load_mono_frames(sequence_dir: Path) -> list[MonoFrameEntry]:
+    """Only reads image_0/ - no dependency on image_1 existing at all."""
+    sequence_dir = Path(sequence_dir)
+    times = np.loadtxt(sequence_dir / "times.txt")
+    left_files = sorted((sequence_dir / "image_0").iterdir())
+    return [
+        MonoFrameEntry(index=idx, timestamp_ns=int(round(float(times[idx]) * 1e9)), left_path=left_path)
+        for idx, left_path in enumerate(left_files)
+    ]
+
+
 def load_stereo_frames(sequence_dir: Path) -> list[StereoFrameEntry]:
     sequence_dir = Path(sequence_dir)
     times = np.loadtxt(sequence_dir / "times.txt")
@@ -64,10 +75,16 @@ def load_gt_poses(sequence_dir: Path) -> np.ndarray | None:
     Nx4x4 world_from_cam0 matrices, or None if no poses file exists for this sequence."""
     sequence_dir = Path(sequence_dir)
     seq_id = sequence_dir.name
-    # sequence_dir = .../datasets/data_odometry_gray/dataset/sequences/<seq> ->
-    # up 4 levels to datasets/, then into the sibling data_odometry_poses release.
-    poses_path = sequence_dir.parents[3] / "data_odometry_poses" / "dataset" / "poses" / f"{seq_id}.txt"
-    if not poses_path.exists():
+    # Two known layouts: the official two-tarball release keeps poses in a sibling
+    # data_odometry_poses release 4 levels up from sequence_dir; a merged local layout
+    # (sequences/ and poses/ both directly under the same dataset/ root) keeps them one
+    # level up instead - try both, in that order.
+    candidates = [
+        sequence_dir.parents[3] / "data_odometry_poses" / "dataset" / "poses" / f"{seq_id}.txt",
+        sequence_dir.parents[1] / "poses" / f"{seq_id}.txt",
+    ]
+    poses_path = next((p for p in candidates if p.exists()), None)
+    if poses_path is None:
         return None
     raw = np.loadtxt(poses_path)
     n = raw.shape[0]

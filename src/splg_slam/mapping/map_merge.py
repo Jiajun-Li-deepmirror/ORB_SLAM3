@@ -1,16 +1,14 @@
 import cv2
 import numpy as np
 
-from splg_slam.geometry.pose_utils import invert_pose
+from splg_slam.geometry.pose_utils import invert_pose, rotation_angle_deg
 from splg_slam.localization.relocalizer import Relocalizer
 from splg_slam.map.world_map import WorldMap
 
 
 def _transform_diff(t1: np.ndarray, t2: np.ndarray) -> tuple[float, float]:
     d_trans = float(np.linalg.norm(t1[:3, 3] - t2[:3, 3]))
-    r_rel = t1[:3, :3].T @ t2[:3, :3]
-    cos_angle = np.clip((np.trace(r_rel) - 1) / 2, -1.0, 1.0)
-    d_rot = float(np.degrees(np.arccos(cos_angle)))
+    d_rot = rotation_angle_deg(t1[:3, :3].T @ t2[:3, :3])
     return d_trans, d_rot
 
 

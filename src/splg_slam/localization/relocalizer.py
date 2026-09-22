@@ -106,12 +106,13 @@ class Relocalizer:
             matches = self.splg.match(kf_feats, query_feats)["matches"]
 
             kf = self.world_map.keyframes[kf_id]
-            obj_pts, img_pts = [], []
+            obj_pts, img_pts, mp_ids = [], [], []
             for kf_i, q_i in matches:
                 mp_id = kf.map_point_ids[kf_i]
                 if mp_id >= 0:
                     obj_pts.append(self.world_map.map_points[mp_id].position)
                     img_pts.append(kpts_q[q_i])
+                    mp_ids.append(int(mp_id))
 
             if len(obj_pts) < self.cfg.tracking.min_inlier_matches:
                 continue
@@ -125,7 +126,16 @@ class Relocalizer:
 
             num_inliers = int(inlier_mask.sum())
             if best is None or num_inliers > best["num_inliers"]:
-                best = {"pose_cw": pose_cw, "num_inliers": num_inliers, "candidate_kf": kf_id, "retrieval_sim": sim}
+                # `correspondences`: (map_point_id, image_point) for every PnP inlier -
+                # consumed by ContinuousLocalizer.session_log to build reprojection factors
+                # in smooth_session_trajectory (see continuous_localizer.py), not used here.
+                correspondences = [
+                    (mp_ids[j], img_pts[j]) for j in range(len(mp_ids)) if inlier_mask[j]
+                ]
+                best = {
+                    "pose_cw": pose_cw, "num_inliers": num_inliers, "candidate_kf": kf_id,
+                    "retrieval_sim": sim, "correspondences": correspondences,
+                }
 
             # Candidates are tried in descending retrieval-similarity order, so once one
             # clears a comfortable inlier margin there's no accuracy reason to pay for

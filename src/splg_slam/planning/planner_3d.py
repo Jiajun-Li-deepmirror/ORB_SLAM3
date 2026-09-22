@@ -76,7 +76,7 @@ def make_segment_free_check(checker: OccupancyChecker, resolution: float, robot_
 def astar_3d(
     checker: OccupancyChecker, resolution: float, start_idx: tuple[int, int, int], goal_idx: tuple[int, int, int],
     origin: np.ndarray, allow_unknown: bool, robot_radius_m: float, inflate_radius_m: float, cost_weight: float,
-    max_expansions: int | None = None,
+    bbx_min: np.ndarray, bbx_max: np.ndarray, max_expansions: int | None = None,
 ):
     """3D A* over a 26-connected voxel grid. With `cost_weight=0` (the default) this is pure
     shortest-Euclidean-distance search - a drone flying through open 3D space doesn't care
@@ -91,7 +91,14 @@ def astar_3d(
     genuinely disconnected start/goal pair (e.g. across an unmapped gap) makes the search
     exhaust the *entire* reachable free/unknown component before reporting failure, which for
     an online replanning loop called every few seconds is a real latency problem, not just an
-    edge case."""
+    edge case.
+
+    `bbx_min`/`bbx_max`: the same box the caller's EDT was built over (see build_edt).
+    checker.clearance() is only valid inside that box - a cell outside it is treated as
+    blocked regardless of what clearance() would (wrongly) report for it, so a detour never
+    silently loses its robot_radius_m safety margin the moment it steps past the padded
+    region. Hard occupancy (checker.state()) is unaffected, since that's a raw octree query,
+    box-independent."""
 
     def idx_to_world(idx):
         return origin + np.array(idx) * resolution
@@ -99,7 +106,13 @@ def astar_3d(
     def heuristic(a, b):
         return float(np.linalg.norm(np.array(a) - np.array(b)))
 
-    is_blocked = make_is_blocked(checker, robot_radius_m, allow_unknown)
+    def in_bbx(xyz) -> bool:
+        return bool(np.all(xyz >= bbx_min) and np.all(xyz <= bbx_max))
+
+    base_is_blocked = make_is_blocked(checker, robot_radius_m, allow_unknown)
+
+    def is_blocked(xyz) -> bool:
+        return (not in_bbx(xyz)) or base_is_blocked(xyz)
 
     def soft_cost(idx):
         if inflate_radius_m <= 0:
@@ -197,7 +210,7 @@ def plan_3d(
 
     path_idx, _ = astar_3d(
         checker, resolution, world_to_idx(start), world_to_idx(goal), origin, allow_unknown,
-        robot_radius_m, inflate_radius_m, cost_weight, max_expansions=max_expansions,
+        robot_radius_m, inflate_radius_m, cost_weight, bbx_min, bbx_max, max_expansions=max_expansions,
     )
     if path_idx is None:
         return None, None, "no path found"

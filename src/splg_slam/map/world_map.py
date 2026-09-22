@@ -17,6 +17,51 @@ class WorldMap:
         self.covisibility: dict[int, dict[int, int]] = defaultdict(dict)
         self.loop_edges: list[tuple[int, int, np.ndarray, int]] = []  # (kf_a, kf_b, rel, num_inliers)
         self.imu_factors: list[tuple[int, int, np.ndarray]] = []  # (kf_a, kf_b, Nx7 [t_s,wx,wy,wz,ax,ay,az])
+        # Raw IMU samples spanning an Atlas re-init transition: (old_kf_id, new_kf_id, Nx7
+        # samples) - kept SEPARATE from imu_factors (never added there) because the two
+        # keyframes are in different, not-yet-related coordinate frames; imu_factors'
+        # consumer (local_bundle_adjustment) adds a same-frame CombinedImuFactor for every
+        # entry, which would be a meaningless (or actively wrong) constraint here. Recorded
+        # so build_map.py's fallback-stitch pass can use the real IMU physics (not a
+        # constant-velocity guess) to estimate the still-unknown merge transform between the
+        # two segments when a genuine visual re-identification never succeeds - see
+        # tracker.py's _start_new_map_segment for where this gets populated.
+        self.segment_transition_imu_samples: list[tuple[int, int, np.ndarray]] = []
+        # Every successful relocalization jump: (frame_id, anchor_kf_id, rel), where rel is
+        # the pose *relative to* anchor_kf_id (the matched candidate keyframe) at the
+        # moment of relocalization - not an absolute pose, and not necessarily a keyframe
+        # itself, since relocalization only re-anchors ref_keyframe and doesn't insert one.
+        # Stored relative to anchor_kf_id (not absolute) so that if anchor_kf_id's own pose
+        # later gets corrected (pose-graph optimization, a loop-edge merge, global BA - all
+        # of which happen far more often than relocalization itself), recomputing
+        # `rel @ anchor_kf.pose_cw` with the anchor's *current* pose keeps this event
+        # positioned consistently with the rest of the map instead of going stale as a
+        # frozen snapshot. Kept for trajectory-status visualization (plot_xy.py).
+        self.relocalization_events: list[tuple[int, int, np.ndarray]] = []
+        # Every Atlas cross-segment merge: (new_kf_id, cand_kf_id) - the two keyframes
+        # whose visual match triggered transform_segment's rigid weld (see build_map.py's
+        # try_close_loops). Deliberately NOT added to loop_edges: a merge has no residual
+        # "drift" for pose-graph optimization to correct (the whole segment was already
+        # rigidly re-placed to match exactly), so it isn't a BetweenFactor-style edge - it's
+        # a distinct event kind, kept separately for trajectory-status visualization
+        # (plot_xy.py, colored apart from same-segment loop closures).
+        self.segment_merges: list[tuple[int, int]] = []
+        # Every low-confidence fallback stitch: (anchor_kf_id, [stitched_kf_ids]) - applied
+        # to an Atlas segment that, even after exhaustive orphan-segment reconciliation
+        # (see build_map.py), never found a genuine visual re-identification match. Rather
+        # than leave it permanently isolated in its own unrelated coordinate frame (losing
+        # continuity of the final trajectory), it's welded on with a *zero-displacement*
+        # guess - "assume the camera was still roughly at anchor_kf_id's position when this
+        # segment's first keyframe was captured" - the same "keep going on a degraded
+        # estimate rather than stop" philosophy a plain accumulating VO/pose-graph backend
+        # (no multi-segment concept at all) is forced into by construction. This is NOT a
+        # verified closure: no visual evidence backs the assumed position, only continuity.
+        # The full stitched kf_id list is recorded (not just the first one) because
+        # transform_segment relabels segment_id to the surviving one, so segment_id alone
+        # can no longer distinguish these from originally-main-segment keyframes
+        # afterward. Kept separately from segment_merges so trajectory-status
+        # visualization (plot_xy.py) can flag it as distinctly lower-confidence.
+        self.fallback_stitches: list[tuple[int, list[int]]] = []
         self.point_probation: dict[int, int] = {}  # point_id -> keyframe count at creation
         self.frame_processing_times_s: list[float] = []  # per-input-frame wall-clock time (seconds)
         self._next_point_id = 0
@@ -24,15 +69,88 @@ class WorldMap:
     def add_loop_edge(self, kf_id_a: int, kf_id_b: int, relative_pose_a_from_b: np.ndarray, num_inliers: int) -> None:
         self.loop_edges.append((kf_id_a, kf_id_b, relative_pose_a_from_b, num_inliers))
 
+    def add_segment_merge(self, new_kf_id: int, cand_kf_id: int) -> None:
+        self.segment_merges.append((new_kf_id, cand_kf_id))
+
+    def add_fallback_stitch(self, anchor_kf_id: int, stitched_kf_ids: list[int]) -> None:
+        self.fallback_stitches.append((anchor_kf_id, list(stitched_kf_ids)))
+
     def add_imu_factor(self, kf_id_a: int, kf_id_b: int, samples: np.ndarray) -> None:
         self.imu_factors.append((kf_id_a, kf_id_b, samples))
+
+    def add_segment_transition_imu_samples(self, old_kf_id: int, new_kf_id: int, samples: np.ndarray) -> None:
+        self.segment_transition_imu_samples.append((old_kf_id, new_kf_id, samples))
+
+    def add_relocalization_event(self, frame_id: int, anchor_kf_id: int, pose_cw: np.ndarray) -> None:
+        """`pose_cw` is the absolute pose solved at relocalization time - stored relative to
+        `anchor_kf_id` (the matched candidate keyframe)'s pose at that same moment, so it can
+        be recomputed against the anchor's *current* pose later (see relocalization_events'
+        docstring above)."""
+        from splg_slam.geometry.pose_utils import invert_pose
+
+        anchor_pose_cw = self.keyframes[anchor_kf_id].pose_cw
+        rel = pose_cw @ invert_pose(anchor_pose_cw)
+        self.relocalization_events.append((frame_id, anchor_kf_id, rel))
+
+    def relocalization_event_pose(self, event: tuple[int, int, np.ndarray]) -> np.ndarray | None:
+        """Recomputes an event's absolute pose against anchor_kf_id's *current* pose - see
+        relocalization_events' docstring. Returns None if the anchor keyframe no longer
+        exists (e.g. culled)."""
+        _frame_id, anchor_kf_id, rel = event
+        anchor_kf = self.keyframes.get(anchor_kf_id)
+        if anchor_kf is None:
+            return None
+        return rel @ anchor_kf.pose_cw
 
     def add_keyframe(self, kf: KeyFrame) -> None:
         self.keyframes[kf.frame_id] = kf
 
+    def transform_keyframes(self, kf_ids: set[int], transform: np.ndarray) -> None:
+        """Bulk rigid-transforms every keyframe pose in `kf_ids` and every map point whose
+        observations are a strict subset of `kf_ids` by `transform` (4x4, maps a point/pose
+        from `kf_ids`'s own local world into the target world). Shared by transform_segment
+        (whole Atlas segment) and a same-segment long-arc loop closure that welds just the
+        unanchored excursion between the closure's two endpoints (see build_map.py's
+        try_close_loops) - both are "two chunks of map that each internally agree with
+        themselves but not with each other yet" problems, just with `kf_ids` picked
+        differently (by segment_id vs. by keyframe-id range since the last loop anchor).
+
+        A map point only moves if *every* keyframe observing it is in `kf_ids` - one already
+        fused across the boundary (mixed observations) is left alone, since a single rigid
+        transform can't correctly move a point that's simultaneously correct in two
+        different coordinate frames without first being fused into one."""
+        from splg_slam.geometry.pose_utils import invert_pose
+
+        transform_inv = invert_pose(transform)
+        for kf_id in kf_ids:
+            kf = self.keyframes[kf_id]
+            kf.pose_cw = kf.pose_cw @ transform_inv
+        for mp in self.map_points.values():
+            observers = set(mp.observations.keys())
+            if observers and observers <= kf_ids:
+                mp.position = (transform[:3, :3] @ mp.position) + transform[:3, 3]
+
+    def transform_segment(self, segment_id: int, transform: np.ndarray, merge_into_segment_id: int) -> None:
+        """Bulk rigid-transforms every keyframe pose and map point position belonging to
+        `segment_id` (an Atlas map segment - see KeyFrame.segment_id) by `transform` (4x4,
+        maps a point/pose from that segment's own local world into the target world), then
+        relabels them as `merge_into_segment_id`.
+
+        Used to weld a segment onto the rest of the map in one shot once a real (visually
+        verified) connection to it is found, ORB-SLAM3-Atlas-style - rather than nudging it
+        into place via a loop-closure pose-graph edge, which only works for correcting
+        *drift* (both sides already agree on roughly where they are). An Atlas segment's
+        first keyframe never claimed to share a coordinate frame with the rest of the map
+        (see OfflineMapper._start_new_map_segment) - there's no "drift" to speak of, just
+        two unrelated coordinate frames that need a one-time rigid alignment."""
+        seg_kf_ids = {kf_id for kf_id, kf in self.keyframes.items() if kf.segment_id == segment_id}
+        self.transform_keyframes(seg_kf_ids, transform)
+        for kf_id in seg_kf_ids:
+            self.keyframes[kf_id].segment_id = merge_into_segment_id
+
     def new_map_point(self, position: np.ndarray, descriptor: np.ndarray, created_at_kf_count: int | None = None) -> int:
         point_id = self._next_point_id
-        self.map_points[point_id] = MapPoint(point_id=point_id, position=position, descriptor=descriptor)
+        self.map_points[point_id] = MapPoint(position=position, descriptor=descriptor)
         self._next_point_id += 1
         if created_at_kf_count is not None:
             self.point_probation[point_id] = created_at_kf_count
@@ -120,16 +238,19 @@ class WorldMap:
 
     def add_observation(self, point_id: int, keyframe_id: int, kp_idx: int) -> None:
         mp = self.map_points[point_id]
+        existing_kf_ids = [kf_id for kf_id in mp.observations if kf_id != keyframe_id]
         mp.add_observation(keyframe_id, kp_idx)
         self.keyframes[keyframe_id].map_point_ids[kp_idx] = point_id
-        self._update_covisibility_for(point_id)
+        self._increment_covisibility_for_new_observer(keyframe_id, existing_kf_ids)
 
-    def _update_covisibility_for(self, point_id: int) -> None:
-        kf_ids = list(self.map_points[point_id].observations.keys())
-        for i, kf_a in enumerate(kf_ids):
-            for kf_b in kf_ids[i + 1:]:
-                self.covisibility[kf_a][kf_b] = self.covisibility[kf_a].get(kf_b, 0) + 1
-                self.covisibility[kf_b][kf_a] = self.covisibility[kf_b].get(kf_a, 0) + 1
+    def _increment_covisibility_for_new_observer(self, new_kf_id: int, existing_kf_ids: list[int]) -> None:
+        """Bumps the shared-point count between `new_kf_id` and each keyframe that
+        already observed this point, once - not all pairs among the point's full
+        observer set, which would re-count already-counted pairs every time a further
+        observation is added to a long-lived point."""
+        for other_kf in existing_kf_ids:
+            self.covisibility[new_kf_id][other_kf] = self.covisibility[new_kf_id].get(other_kf, 0) + 1
+            self.covisibility[other_kf][new_kf_id] = self.covisibility[other_kf].get(new_kf_id, 0) + 1
 
     def remove_keyframe(self, kf_id: int) -> None:
         """Deletes a keyframe and drops its observation from every map point it saw (a

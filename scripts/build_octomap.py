@@ -9,6 +9,7 @@ import octomap
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from splg_slam.config import load_config
+from splg_slam.data.euroc import load_depth_lookup
 from splg_slam.data.loader import dataset_dir, dataset_module, right_image_path
 from splg_slam.geometry.stereo import StereoDepthEstimator, StereoRectifier
 from splg_slam.map.io import load_map
@@ -67,6 +68,13 @@ def main():
     depth_est = StereoDepthEstimator(
         rectifier, min_disp=cfg.stereo.min_disp, num_disp=cfg.stereo.num_disp, block_size=cfg.stereo.block_size,
     )
+    use_sensor_depth = bool(getattr(cfg.dataset, "use_sensor_depth", False))
+    depth_lookup = load_depth_lookup(dataset_dir(cfg)) if use_sensor_depth else None
+    if use_sensor_depth and depth_lookup is None:
+        print("warning: dataset.use_sensor_depth=true but no depth0/data.csv found; falling back to computed stereo disparity")
+    elif depth_lookup is not None:
+        depth_ts_sorted = np.array(sorted(depth_lookup))
+        print(f"using sensor-provided depth0/ ({len(depth_lookup)} frames) instead of computed stereo disparity")
 
     if args.min_depth_m is not None:
         min_depth_m = args.min_depth_m
@@ -81,23 +89,53 @@ def main():
     kf_ids = world_map.keyframe_ids_sorted()[:: args.every_n_kf]
     print(f"Building octomap ({args.resolution}m resolution) from {len(kf_ids)} keyframes...")
 
+    # rosbag2 keyframes don't persist a per-frame image_path (frames are read directly off
+    # the bag at tracking time, never written to disk) - unlike euroc/kitti's file-path
+    # convention this script/dense_map.py otherwise assume. Pre-scan the bag once, keeping
+    # only the (already-rectified) images whose timestamp matches a keyframe we need, keyed
+    # by timestamp_ns exactly as recorded on the Frame at insertion time (see tracker.py).
+    rosbag_images = None
+    if getattr(cfg.dataset, "kind", "euroc") == "rosbag2":
+        needed_ts = {world_map.keyframes[kf_id].timestamp_ns for kf_id in kf_ids}
+        rosbag_images = {}
+        for entry in dataset_module(cfg).load_stereo_frames(dataset_dir(cfg)):
+            if entry.timestamp_ns in needed_ts:
+                rosbag_images[entry.timestamp_ns] = (entry.left_image, entry.right_image)
+                if len(rosbag_images) == len(needed_ts):
+                    break
+        print(f"  rosbag2 dataset: matched {len(rosbag_images)}/{len(needed_ts)} keyframe timestamps to bag frames")
+
     pixel_xy = None
     n_used = 0
     for count, kf_id in enumerate(kf_ids):
         kf = world_map.keyframes[kf_id]
-        if kf.image_path is None:
-            continue
-        left_path = Path(kf.image_path)
-        right_path = right_image_path(left_path, cfg)
-        img_l = cv2.imread(str(left_path), cv2.IMREAD_GRAYSCALE)
-        img_r = cv2.imread(str(right_path), cv2.IMREAD_GRAYSCALE)
-        if img_l is None or img_r is None:
-            continue
+        if rosbag_images is not None:
+            pair = rosbag_images.get(kf.timestamp_ns)
+            if pair is None:
+                continue
+            img_l, img_r = pair
+        else:
+            if kf.image_path is None:
+                continue
+            left_path = Path(kf.image_path)
+            right_path = right_image_path(left_path, cfg)
+            img_l = cv2.imread(str(left_path), cv2.IMREAD_GRAYSCALE)
+            img_r = cv2.imread(str(right_path), cv2.IMREAD_GRAYSCALE)
+            if img_l is None or img_r is None:
+                continue
+
+        depth_image_mm = None
+        if depth_lookup is not None:
+            j = int(np.searchsorted(depth_ts_sorted, kf.timestamp_ns))
+            j = min(max(j, 0), len(depth_ts_sorted) - 1)
+            if j > 0 and abs(depth_ts_sorted[j - 1] - kf.timestamp_ns) < abs(depth_ts_sorted[j] - kf.timestamp_ns):
+                j -= 1
+            depth_image_mm = cv2.imread(str(depth_lookup[int(depth_ts_sorted[j])]), cv2.IMREAD_UNCHANGED)
 
         pixel_xy = insert_keyframe_into_octree(
             tree, img_l, img_r, kf.pose_cw, rectifier, depth_est, pixel_xy,
             args.stride, args.max_depth_m, args.outlier_nb_neighbors, args.outlier_std_ratio, r_align,
-            min_depth_m=min_depth_m,
+            min_depth_m=min_depth_m, depth_image_mm=depth_image_mm,
         )
         n_used += 1
 

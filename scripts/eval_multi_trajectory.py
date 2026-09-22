@@ -10,6 +10,7 @@ from eval_trajectory import load_gt, print_stats, umeyama
 
 from splg_slam.geometry.pose_utils import camera_center
 from splg_slam.map.io import load_map
+from splg_slam.utils import nearest_indices
 
 
 def main():
@@ -49,7 +50,7 @@ def main():
             unmatched += 1
             continue
         _, gt_ts, gt_xyz = next((m, t, x) for m, t, x in dataset_gts if m == marker_match)
-        gi = int(np.clip(np.searchsorted(gt_ts, kf.timestamp_ns), 0, len(gt_ts) - 1))
+        gi = int(nearest_indices(gt_ts, kf.timestamp_ns))
         centers.append(camera_center(kf.pose_cw))
         gt_matched.append(gt_xyz[gi])
         per_dataset_count[marker_match] = per_dataset_count.get(marker_match, 0) + 1

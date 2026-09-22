@@ -86,9 +86,20 @@ def rotation_aligning(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.eye(3) + vx + vx @ vx * ((1 - c) / (s ** 2))
 
 
-def gravity_alignment_rotation(accel_samples: np.ndarray) -> np.ndarray:
+def gravity_alignment_rotation(accel_samples: np.ndarray, accel_bias: np.ndarray | None = None) -> np.ndarray:
     """Returns R_world_body (3x3): rotates a body-frame vector into a world frame whose +Z
     axis points opposite gravity, estimated from a (near-)static window's average
     accelerometer reading - a stationary accelerometer reads the reaction to gravity, i.e.
-    "up" in the body frame. Use find_static_window() to locate that window first."""
-    return rotation_aligning(accel_samples.mean(axis=0), np.array([0.0, 0.0, 1.0]))
+    "up" in the body frame. Use find_static_window() to locate that window first.
+
+    `accel_bias`, if given (a pre-calibrated or previously-estimated accelerometer bias,
+    same 3-vector convention as KeyFrame.imu_bias[:3]), is subtracted from every sample
+    before averaging. Without it, this method has no way to separate "true gravity
+    direction" from "sensor bias" at all - unlike the dynamic/motion-based solve
+    (_estimate_gravity_bias_and_velocities), a single static window has no rotational
+    diversity to tell the two apart, so it silently bakes whatever bias the sensor has
+    straight into the resulting orientation. A known bias removes that specific error
+    source even though this method still can't detect a bias it doesn't already know
+    about."""
+    samples = accel_samples if accel_bias is None else accel_samples - accel_bias
+    return rotation_aligning(samples.mean(axis=0), np.array([0.0, 0.0, 1.0]))

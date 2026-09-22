@@ -45,18 +45,10 @@ class SPLG:
 
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.use_fp16):
             matches01 = self.matcher({"image0": feats0, "image1": feats1})
-        f0, f1, m01 = rbd(feats0), rbd(feats1), rbd(matches01)
-
-        matches = m01["matches"].cpu().numpy()  # Mx2 indices into kpts0/kpts1
-        scores = m01["scores"].cpu().numpy() if "scores" in m01 else None
-        return {
-            "kpts0": f0["keypoints"].cpu().numpy(),
-            "kpts1": f1["keypoints"].cpu().numpy(),
-            "desc0": f0["descriptors"].cpu().numpy(),
-            "desc1": f1["descriptors"].cpu().numpy(),
-            "matches": matches,
-            "scores": scores,
-        }
+        # Every caller only reads ["matches"]; skip pulling keypoints/descriptors/scores
+        # off the GPU too (real per-call cost in the tracker's hot loop).
+        matches = rbd(matches01)["matches"].cpu().numpy()  # Mx2 indices into kpts0/kpts1
+        return {"matches": matches}
 
     @staticmethod
     def to_frame_arrays(feats: dict) -> tuple[np.ndarray, np.ndarray]:

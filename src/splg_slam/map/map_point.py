@@ -5,7 +5,6 @@ import numpy as np
 
 @dataclass
 class MapPoint:
-    point_id: int
     position: np.ndarray  # 3, world coordinates
     descriptor: np.ndarray  # 256, representative SuperPoint descriptor
     observations: dict[int, int] = field(default_factory=dict)  # keyframe_id -> keypoint_index

@@ -29,9 +29,22 @@ def ransac_ground_alignment(
     rotated = (r_align @ points.T).T
     inlier_mask = np.zeros(len(points), dtype=bool)
     inlier_mask[inlier_idx] = True
-    if np.median(rotated[inlier_mask, 2]) > np.median(rotated[~inlier_mask, 2]):
-        # picked the wrong sign - most of the scene ended up BELOW the "floor", flip it
-        r_align = rotation_aligning(-normal, np.array([0.0, 0.0, 1.0]))
+    outlier_mask = ~inlier_mask
+    if inlier_mask.any() and outlier_mask.any():
+        if np.median(rotated[inlier_mask, 2]) > np.median(rotated[outlier_mask, 2]):
+            # picked the wrong sign - most of the scene ended up BELOW the "floor", flip it
+            r_align = rotation_aligning(-normal, np.array([0.0, 0.0, 1.0]))
+    else:
+        # Every point (or none) was a plane inlier - no "rest of the scene" to compare
+        # against, so the median comparison would silently evaluate on an empty/NaN
+        # array and always resolve to "don't flip" instead of flagging that the sign
+        # genuinely can't be determined this way.
+        print(
+            "  [ground_alignment] WARNING: plane RANSAC marked "
+            f"{'all' if outlier_mask.sum() == 0 else 'none'} of {len(points)} points as "
+            "inliers - cannot disambiguate floor-normal sign from scene geometry, "
+            "keeping the untested orientation"
+        )
 
     return r_align, {
         "num_inliers": len(inlier_idx),

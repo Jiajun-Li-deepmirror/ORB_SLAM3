@@ -60,18 +60,42 @@ def search_local_map(
     kpts_c = kpts[cand_idx]
     desc_c = descriptors[cand_idx]
 
-    dist = np.linalg.norm(uv_m[:, None, :] - kpts_c[None, :, :], axis=2)
-    sim = desc_m @ desc_c.T
+    # Bucket current-frame keypoints into a radius_px-sized grid so each projected map
+    # point only gets compared against spatially nearby keypoints, instead of building and
+    # fully sorting a dense M-by-N distance+similarity matrix against every keypoint in the
+    # frame regardless of how sparse genuine radius_px matches actually are - this local
+    # map window can hold thousands of points, and this runs every tracked frame. A single
+    # ring of 3x3 neighbor cells is always sufficient to find every keypoint within
+    # radius_px of a point, since the cell size equals radius_px.
+    cell = max(radius_px, 1e-6)
+    buckets: dict[tuple[int, int], list[int]] = {}
+    for local_j, (cx, cy) in enumerate(np.floor(kpts_c / cell).astype(np.int64)):
+        buckets.setdefault((int(cx), int(cy)), []).append(local_j)
+
+    pair_i, pair_j = [], []
+    for local_i, (px, py) in enumerate(np.floor(uv_m / cell).astype(np.int64)):
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for local_j in buckets.get((int(px) + dx, int(py) + dy), ()):
+                    pair_i.append(local_i)
+                    pair_j.append(local_j)
+
+    if not pair_i:
+        return [], [], [], []
+
+    pair_i = np.array(pair_i)
+    pair_j = np.array(pair_j)
+    dist = np.linalg.norm(uv_m[pair_i] - kpts_c[pair_j], axis=1)
+    sim = np.sum(desc_m[pair_i] * desc_c[pair_j], axis=1)
     sim = np.where(dist < radius_px, sim, -1.0)
 
-    order = np.argsort(-sim, axis=None)
+    order = np.argsort(-sim)
     used_m, used_n = set(), set()
     obj_pts, img_pts, matched_point_ids, matched_kp_idx = [], [], [], []
-    n_cols = sim.shape[1]
     for flat_i in order:
-        i, j = divmod(int(flat_i), n_cols)
-        if sim[i, j] < desc_threshold:
+        if sim[flat_i] < desc_threshold:
             break
+        i, j = int(pair_i[flat_i]), int(pair_j[flat_i])
         if i in used_m or j in used_n:
             continue
         used_m.add(i)

@@ -15,6 +15,7 @@ from splg_slam.data import kitti as kitti_data
 from splg_slam.geometry.alignment import robust_umeyama, umeyama
 from splg_slam.geometry.pose_utils import camera_center
 from splg_slam.map.io import load_map
+from splg_slam.utils import nearest_indices
 
 
 def load_gt(path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -65,7 +66,7 @@ def main():
 
     gt_path = Path(args.gt_path)
     gt_ts, gt_xyz = kitti_data.load_gt_as_xyz(gt_path) if gt_path.is_dir() else load_gt(gt_path)
-    gt_idx = np.clip(np.searchsorted(gt_ts, timestamps), 0, len(gt_ts) - 1)
+    gt_idx = nearest_indices(gt_ts, timestamps)
     gt_matched = gt_xyz[gt_idx]
 
     r, s, t = umeyama(centers, gt_matched)

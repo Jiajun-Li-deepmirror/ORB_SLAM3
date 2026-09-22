@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import open3d as o3d
 
@@ -9,7 +10,7 @@ def insert_keyframe_into_octree(
     tree, img_left_gray: np.ndarray, img_right_gray: np.ndarray, pose_cw: np.ndarray,
     rectifier: StereoRectifier, depth_est: StereoDepthEstimator, pixel_xy: np.ndarray | None,
     stride: int, max_depth_m: float, outlier_nb_neighbors: int = 20, outlier_std_ratio: float = 1.5,
-    r_align: np.ndarray | None = None, min_depth_m: float = 0.0,
+    r_align: np.ndarray | None = None, min_depth_m: float = 0.0, depth_image_mm: np.ndarray | None = None,
 ) -> np.ndarray:
     """Ray-casts one keyframe's dense stereo depth into a persistent Octomap OcTree, marking
     traversed voxels FREE and endpoints OCCUPIED - insertPointCloud() distinguishes "seen
@@ -21,16 +22,27 @@ def insert_keyframe_into_octree(
 
     Returns `pixel_xy` (the strided sample grid) so the caller can reuse it across keyframes
     without recomputing it from the image shape every time - same array in, same array out,
-    computed once on the first call (`pixel_xy=None`)."""
+    computed once on the first call (`pixel_xy=None`).
+
+    depth_image_mm: optional sensor-provided depth (raw uint16 mm, on cam0's unrectified
+    pixel grid, e.g. a RealSense's onboard depth output) for this keyframe - sampled instead
+    of computing stereo SGBM disparity, sidestepping our own stereo-baseline calibration."""
     rect_l, rect_r = rectifier.rectify(img_left_gray, img_right_gray)
-    disp = depth_est.compute_disparity(rect_l, rect_r)
 
     if pixel_xy is None:
-        h, w = disp.shape
+        h, w = rect_l.shape
         ys, xs = np.mgrid[0:h:stride, 0:w:stride]
         pixel_xy = np.stack([xs.ravel(), ys.ravel()], axis=1).astype(np.float64)
 
-    depths = depth_est.depths_at_points(disp, pixel_xy)
+    if depth_image_mm is not None:
+        depth_rect = cv2.remap(depth_image_mm, rectifier.map_l[0], rectifier.map_l[1], cv2.INTER_NEAREST)
+        xi = pixel_xy[:, 0].astype(np.int64)
+        yi = pixel_xy[:, 1].astype(np.int64)
+        d_mm = depth_rect[yi, xi].astype(np.float64)
+        depths = np.where((d_mm > 0) & (d_mm < 65535), d_mm / 1000.0, np.nan)
+    else:
+        disp = depth_est.compute_disparity(rect_l, rect_r)
+        depths = depth_est.depths_at_points(disp, pixel_xy)
     # Below min_depth_m, disparity is saturating at the matcher's own max-disparity search
     # limit rather than measuring anything real - it reports a hard-clamped near-camera depth
     # for pixels it simply failed to match, not a genuine close surface. That spurious "point"

@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 
 from splg_slam.data.euroc import StereoRig
+from splg_slam.geometry.camera import PinholeCamera, build_K
 
 
 class StereoRectifier:
@@ -34,23 +35,49 @@ class StereoRectifier:
 
     @property
     def K_rect(self) -> np.ndarray:
-        return np.array(
-            [[self.fx_rect, 0.0, self.cx_rect],
-             [0.0, self.fy_rect, self.cy_rect],
-             [0.0, 0.0, 1.0]],
-            dtype=np.float64,
-        )
+        return build_K(self.fx_rect, self.fy_rect, self.cx_rect, self.cy_rect)
 
     def rectify(self, img_left: np.ndarray, img_right: np.ndarray):
         rect_l = cv2.remap(img_left, *self.map_l, cv2.INTER_LINEAR)
         rect_r = cv2.remap(img_right, *self.map_r, cv2.INTER_LINEAR)
         return rect_l, rect_r
 
+    def rectify_left(self, img_left: np.ndarray) -> np.ndarray:
+        """Left-only rectify - for a caller that never uses the right image (e.g.
+        Relocalizer, which does PnP against the map's own 3D points, not stereo depth),
+        this skips both the right image's disk read AND its remap, not just the remap."""
+        return cv2.remap(img_left, *self.map_l, cv2.INTER_LINEAR)
+
     def backproject(self, points_xy: np.ndarray, depths: np.ndarray) -> np.ndarray:
         """points_xy: Nx2 pixel coords, depths: N meters. Returns Nx3 points in the rectified left camera frame."""
         x = (points_xy[:, 0] - self.cx_rect) * depths / self.fx_rect
         y = (points_xy[:, 1] - self.cy_rect) * depths / self.fy_rect
         return np.stack([x, y, depths], axis=1)
+
+
+class MonoRectifier:
+    """Undistorts cam0 alone (no cam1/baseline needed at all) but keeps the same
+    `.rectify(img, img_right=None)` -> (rect, rect) two-tuple and `.K_rect` interface as
+    StereoRectifier, so every consumer that only ever uses those two (loop_closure.py,
+    relocalizer.py, and process_mono_pair/process_stereo_pair's own rect_l/rect_r-shaped
+    calls) needs zero changes to work with either rectifier."""
+
+    def __init__(self, cam0: PinholeCamera):
+        k, d = cam0.K, cam0.dist_coeffs
+        size = (cam0.width, cam0.height)
+        self.map_l = cv2.initUndistortRectifyMap(k, d, None, k, size, cv2.CV_32FC1)
+        self.fx_rect = float(k[0, 0])
+        self.fy_rect = float(k[1, 1])
+        self.cx_rect = float(k[0, 2])
+        self.cy_rect = float(k[1, 2])
+
+    @property
+    def K_rect(self) -> np.ndarray:
+        return build_K(self.fx_rect, self.fy_rect, self.cx_rect, self.cy_rect)
+
+    def rectify(self, img_left: np.ndarray, img_right: np.ndarray | None = None):
+        rect = cv2.remap(img_left, *self.map_l, cv2.INTER_LINEAR)
+        return rect, rect
 
 
 class StereoDepthEstimator:

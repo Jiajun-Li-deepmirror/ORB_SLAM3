@@ -55,6 +55,13 @@ class StereoFrameEntry:
     right_path: Path
 
 
+@dataclass
+class MonoFrameEntry:
+    index: int
+    timestamp_ns: int
+    left_path: Path
+
+
 def _read_data_csv(path: Path) -> list[tuple[int, str]]:
     entries = []
     with open(path) as f:
@@ -71,7 +78,6 @@ class ImuCalibration:
     gyro_random_walk: float  # rad/s^2/sqrt(Hz)
     accel_noise_density: float  # m/s^2/sqrt(Hz)
     accel_random_walk: float  # m/s^3/sqrt(Hz)
-    rate_hz: float
     T_cam0_body: np.ndarray  # 4x4, maps points from body/IMU frame into the cam0 frame
 
 
@@ -91,7 +97,6 @@ def load_imu_calibration(mav0_dir: Path) -> ImuCalibration:
         gyro_random_walk=float(y_imu["gyroscope_random_walk"]),
         accel_noise_density=float(y_imu["accelerometer_noise_density"]),
         accel_random_walk=float(y_imu["accelerometer_random_walk"]),
-        rate_hz=float(y_imu["rate_hz"]),
         T_cam0_body=t_cam0_body,
     )
 
@@ -107,6 +112,18 @@ def load_imu_measurements(mav0_dir: Path) -> np.ndarray:
             rows.append([float(x) for x in row[:7]])
     measurements = np.array(rows, dtype=np.float64)
     return measurements[np.argsort(measurements[:, 0])]
+
+
+def load_mono_frames(mav0_dir: Path) -> list[MonoFrameEntry]:
+    """Only reads cam0/data.csv - no dependency on cam1 existing at all (unlike
+    load_stereo_frames, which silently drops any frame missing a cam1 match), so mono
+    tracking works even against a dataset that only ever had one camera recorded."""
+    mav0_dir = Path(mav0_dir)
+    left_entries = _read_data_csv(mav0_dir / "cam0" / "data.csv")
+    return [
+        MonoFrameEntry(index=idx, timestamp_ns=ts_ns, left_path=mav0_dir / "cam0" / "data" / lname)
+        for idx, (ts_ns, lname) in enumerate(left_entries)
+    ]
 
 
 def load_stereo_frames(mav0_dir: Path) -> list[StereoFrameEntry]:
@@ -129,3 +146,18 @@ def load_stereo_frames(mav0_dir: Path) -> list[StereoFrameEntry]:
             )
         )
     return frames
+
+
+def load_depth_lookup(mav0_dir: Path) -> dict[int, Path] | None:
+    """Optional depth0/ (a 16-bit-mm depth stream already registered to cam0's raw,
+    unrectified pixel grid, e.g. a RealSense's onboard depth output) -> {timestamp_ns:
+    path}, or None if this dataset wasn't converted with one. See OfflineMapper's
+    depth_lookup param: sampling this instead of computing stereo SGBM disparity sidesteps
+    stereo-baseline calibration error entirely, by relying on the sensor's own depth
+    pipeline/calibration instead of ours."""
+    mav0_dir = Path(mav0_dir)
+    depth_csv = mav0_dir / "depth0" / "data.csv"
+    if not depth_csv.exists():
+        return None
+    entries = _read_data_csv(depth_csv)
+    return {ts_ns: mav0_dir / "depth0" / "data" / fname for ts_ns, fname in entries}

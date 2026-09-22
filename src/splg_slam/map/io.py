@@ -12,5 +12,9 @@ def save_map(world_map: WorldMap, path: str | Path) -> None:
 
 
 def load_map(path: str | Path) -> WorldMap:
+    """Unpickles a map file with pickle.load, which can execute arbitrary code embedded
+    in the file - only ever call this on a map you (or a trusted pipeline run) produced
+    with save_map, never on one fetched from a shared drive, network location, or
+    another party's run without first establishing it's trustworthy."""
     with open(path, "rb") as f:
         return pickle.load(f)

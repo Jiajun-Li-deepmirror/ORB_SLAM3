@@ -3,6 +3,15 @@ from dataclasses import dataclass
 import numpy as np
 
 
+def build_K(fx: float, fy: float, cx: float, cy: float) -> np.ndarray:
+    return np.array(
+        [[fx, 0.0, cx],
+         [0.0, fy, cy],
+         [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+
+
 @dataclass
 class PinholeCamera:
     fx: float
@@ -15,9 +24,4 @@ class PinholeCamera:
 
     @property
     def K(self) -> np.ndarray:
-        return np.array(
-            [[self.fx, 0.0, self.cx],
-             [0.0, self.fy, self.cy],
-             [0.0, 0.0, 1.0]],
-            dtype=np.float64,
-        )
+        return build_K(self.fx, self.fy, self.cx, self.cy)

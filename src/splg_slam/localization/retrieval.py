@@ -65,7 +65,13 @@ class GlobalDescriptorIndex:
         if self.descriptors.shape[0] == 0:
             return []
         sims = self.descriptors @ descriptor.astype(np.float32)
-        order = np.argsort(-sims)
+        # A full O(N log N) argsort only to keep the top few is wasteful once the map
+        # holds thousands of keyframes. The true top_k excluding `exclude` can only be
+        # pushed down by at most len(exclude) ranks, so argpartition-ing that many extra
+        # candidates (then sorting only that small slice) is sufficient and correct.
+        n_candidates = min(len(sims), top_k + (len(exclude) if exclude else 0))
+        top = np.argpartition(-sims, n_candidates - 1)[:n_candidates] if n_candidates < len(sims) else np.arange(len(sims))
+        order = top[np.argsort(-sims[top])]
         results = []
         for i in order:
             kf_id = self.keyframe_ids[i]

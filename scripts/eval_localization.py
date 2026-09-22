@@ -9,7 +9,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from eval_trajectory import load_gt, umeyama
+from eval_trajectory import load_gt, print_stats, umeyama
 
 from splg_slam.config import load_config
 from splg_slam.data.euroc import load_stereo_frames, load_stereo_rig
@@ -17,13 +17,7 @@ from splg_slam.geometry.pose_utils import camera_center
 from splg_slam.geometry.stereo import StereoRectifier
 from splg_slam.localization.relocalizer import Relocalizer
 from splg_slam.map.io import load_map
-
-
-def print_stats(label: str, values: np.ndarray, unit: str) -> None:
-    print(
-        f"{label}: min={values.min():.4f}{unit} max={values.max():.4f}{unit} "
-        f"median={np.median(values):.4f}{unit} mean={values.mean():.4f}{unit}"
-    )
+from splg_slam.utils import nearest_indices
 
 
 def main():
@@ -48,7 +42,7 @@ def main():
     kf_centers = np.array([camera_center(world_map.keyframes[i].pose_cw) for i in kf_ids])
     kf_timestamps = np.array([world_map.keyframes[i].timestamp_ns for i in kf_ids])
     gt_ts, gt_xyz = load_gt(args.gt_csv)
-    gt_idx = np.clip(np.searchsorted(gt_ts, kf_timestamps), 0, len(gt_ts) - 1)
+    gt_idx = nearest_indices(gt_ts, kf_timestamps)
     r, s, t = umeyama(kf_centers, gt_xyz[gt_idx])
 
     relocalizer = Relocalizer(world_map, rectifier, cfg)
@@ -76,7 +70,7 @@ def main():
 
         center = camera_center(pose_cw)
         aligned = s * (r @ center) + t
-        gi = int(np.clip(np.searchsorted(gt_ts, e.timestamp_ns), 0, len(gt_ts) - 1))
+        gi = int(nearest_indices(gt_ts, e.timestamp_ns))
         errors_m.append(float(np.linalg.norm(aligned - gt_xyz[gi])))
 
         if (i + 1) % 200 == 0:

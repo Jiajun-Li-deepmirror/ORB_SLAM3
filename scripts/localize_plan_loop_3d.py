@@ -16,7 +16,12 @@ from splg_slam.config import load_config
 from splg_slam.data.loader import dataset_dir, dataset_module
 from splg_slam.geometry.pose_utils import camera_center
 from splg_slam.geometry.stereo import StereoRectifier
-from splg_slam.localization.continuous_localizer import ContinuousLocalizer, estimate_max_track_jump_m
+from splg_slam.localization.continuous_localizer import (
+    ContinuousLocalizer,
+    estimate_max_track_jump_m,
+    smooth_session_trajectory,
+    write_session_trajectory,
+)
 from splg_slam.map.io import load_map
 from splg_slam.planning.dense_grid_3d import (
     build_cost_and_blocked_3d, grid_to_world_3d, make_segment_free_check_3d, plan_3d_dense, world_to_grid_3d,
@@ -25,6 +30,8 @@ from splg_slam.planning.dijkstra_field_3d import DijkstraField3DPlanner
 from splg_slam.planning.dstar_lite_3d import DStarLite3DPlanner
 from splg_slam.planning.trajectory import build_trajectory
 from splg_slam.geometry.alignment import umeyama
+from splg_slam.utils import nearest_indices
+from localize_plan_loop import load_imu_for_localizer, nearest_point_on_path
 
 
 def load_euroc_gt(csv_path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -47,20 +54,25 @@ def fit_slam_to_gt(world_map, gt_ts: np.ndarray, gt_xyz: np.ndarray):
     kf_ids = world_map.keyframe_ids_sorted()
     centers = np.array([camera_center(world_map.keyframes[i].pose_cw) for i in kf_ids])
     timestamps = np.array([world_map.keyframes[i].timestamp_ns for i in kf_ids])
-    gt_idx = np.clip(np.searchsorted(gt_ts, timestamps), 0, len(gt_ts) - 1)
+    gt_idx = nearest_indices(gt_ts, timestamps)
     r, s, t = umeyama(centers, gt_xyz[gt_idx])
     print(f"Fitted SLAM-frame -> GT-frame similarity: scale={s:.4f}")
     return r, s, t
 
 
-def pick_last_frame_goal(r: np.ndarray, s: float, t: np.ndarray, gt_xyz: np.ndarray, r_align: np.ndarray | None) -> np.ndarray:
-    """The dataset's last frame's position: the last point of the official GT trajectory,
-    brought back into the SLAM frame via the inverse SLAM->GT fit, then rotated by r_align
-    (if given) to land in the same frame the octomap grid/live positions use."""
-    gt_point = gt_xyz[-1]
+def pick_gt_goal(
+    r: np.ndarray, s: float, t: np.ndarray, gt_xyz: np.ndarray, r_align: np.ndarray | None, gt_frac: float = 1.0,
+) -> np.ndarray:
+    """Picks a point at `gt_frac` along the official GT trajectory (gt_frac=1.0, the
+    default, picks the last point, i.e. the dataset's last frame) as the fixed goal,
+    brought back into the SLAM frame via the inverse SLAM->GT fit, then rotated by
+    r_align (if given) to land in the same frame the octomap grid/live positions use.
+    Mirrors localize_plan_loop.py's pick_gt_goal (2D)."""
+    goal_gt_idx = int(round(gt_frac * (len(gt_xyz) - 1)))
+    gt_point = gt_xyz[goal_gt_idx]
     goal_slam = (r.T @ (gt_point - t)) / s
     goal = r_align @ goal_slam if r_align is not None else goal_slam
-    print(f"Last GT point = {gt_point.round(2)} -> SLAM frame {goal_slam.round(2)} -> grid frame {goal.round(2)}")
+    print(f"GT point #{goal_gt_idx}/{len(gt_xyz)} (frac={gt_frac}) = {gt_point.round(2)} -> SLAM frame {goal_slam.round(2)} -> grid frame {goal.round(2)}")
     return goal
 
 
@@ -112,9 +124,14 @@ def main():
     parser.add_argument("grid_npz", type=str, help="dense grid from build_octomap_grid.py")
     parser.add_argument(
         "--goal", type=float, nargs=3, default=None, metavar=("X", "Y", "Z"),
-        help="override: use this world (grid-frame) point directly. Omit to use the "
-        "dataset's own last frame's position (from official GT, aligned into the grid frame) "
+        help="override: use this world (grid-frame) point directly. Omit to use "
+        "--gt_frac's point along the official GT trajectory (aligned into the grid frame) "
         "as the fixed goal.",
+    )
+    parser.add_argument(
+        "--gt_frac", type=float, default=1.0,
+        help="fraction along the official GT trajectory to use as the fixed goal when "
+        "--goal is omitted (default 1.0: the dataset's own last frame's position).",
     )
     parser.add_argument("--stride", type=int, default=8)
     parser.add_argument(
@@ -223,7 +240,7 @@ def main():
     if args.goal is not None:
         goal = np.array(args.goal, dtype=np.float64)
     else:
-        goal = pick_last_frame_goal(r_fit, s_fit, t_fit, gt_xyz, r_align)
+        goal = pick_gt_goal(r_fit, s_fit, t_fit, gt_xyz, r_align, args.gt_frac)
 
     grid_data = np.load(args.grid_npz)
     grid = {k: grid_data[k] for k in ["occupied", "unknown", "origin", "resolution"]}
@@ -270,8 +287,12 @@ def main():
     else:
         max_track_jump_m = args.max_track_jump_m
     force_relocalize_every = args.force_relocalize_every if args.force_relocalize_every > 0 else None
+    imu_calib, imu_params, imu_measurements = load_imu_for_localizer(cfg, dmod, ddir)
+    if imu_calib is not None:
+        print("IMU dead-reckoning fallback ENABLED (cfg.imu.enabled) - a session with any real anchor will never report LOCALIZATION FAILED again.")
     localizer = ContinuousLocalizer(
         world_map, rectifier, cfg, max_track_jump_m=max_track_jump_m, force_relocalize_every=force_relocalize_every,
+        imu_calib=imu_calib, imu_params=imu_params, imu_measurements=imu_measurements,
     )
 
     checkpoint_marks = set(int(round((k / args.num_checkpoints) * len(entries))) for k in range(1, args.num_checkpoints + 1))
@@ -298,7 +319,7 @@ def main():
         rect_l, _ = rectifier.rectify(img_l, img_r)
 
         t_loc0 = time.monotonic()
-        ok, pose_cw, info = localizer.localize(rect_l)
+        ok, pose_cw, info = localizer.localize(rect_l, timestamp_ns=e.timestamp_ns)
         t_loc1 = time.monotonic()
 
         record = {
@@ -315,7 +336,7 @@ def main():
             pos_raw = camera_center(pose_cw)
             pos = r_align @ pos_raw if r_align is not None else pos_raw
 
-            gt_i = int(np.clip(np.searchsorted(gt_ts, e.timestamp_ns), 0, len(gt_ts) - 1))
+            gt_i = int(nearest_indices(gt_ts, e.timestamp_ns))
             est_gt = s_fit * (r_fit @ pos_raw) + t_fit
             localize_accuracy_m = float(np.linalg.norm(est_gt - gt_xyz[gt_i]))
             localize_errors.append(localize_accuracy_m)
@@ -417,10 +438,21 @@ def main():
     print(
         f"Tier: {localizer.n_track} tracked (cheap, frame-to-keyframe), "
         f"{localizer.n_relocalize} full-relocalized (expensive, global retrieval), "
+        f"{localizer.n_imu_only} IMU-dead-reckoned (both track and relocalize failed), "
         f"{localizer.n_track_lost} tracking-loss events, "
         f"{localizer.n_track_jump_rejected} implausible-jump rejections, "
         f"{localizer.n_forced_relocalize} forced periodic refreshes"
     )
+
+    if localizer.session_log:
+        print("\nRunning end-of-session fixed-map trajectory smoothing "
+              f"({len(localizer.session_log)} logged frames, {localizer.n_imu_only} IMU-only)...")
+        t_smooth0 = time.monotonic()
+        corrected_poses = smooth_session_trajectory(localizer, rectifier.K_rect)
+        traj_out = out_dir / "session_trajectory.csv"
+        write_session_trajectory(localizer.session_log, corrected_poses, str(traj_out))
+        print(f"Corrected session trajectory ({len(corrected_poses)} frames) written to {traj_out} "
+              f"({time.monotonic()-t_smooth0:.1f}s)")
     loc_times_ms = np.array([r["localize_time_s"] * 1000 for r in records if r["localize_ok"]])
     if len(loc_times_ms):
         print(
@@ -449,12 +481,6 @@ def main():
             f"total={plan_times_ms.sum()/1000:.1f}s"
         )
     plot_summary(records, out_dir)
-
-
-def nearest_point_on_path(pos: np.ndarray, path_xyz: np.ndarray) -> tuple[int, float]:
-    d = np.linalg.norm(path_xyz - pos[None, :], axis=1)
-    idx = int(np.argmin(d))
-    return idx, float(d[idx])
 
 
 def plot_checkpoint(grid: dict, record: dict, goal: np.ndarray, frac: float, out_dir: Path) -> None:

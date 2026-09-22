@@ -52,7 +52,9 @@ def main():
     global_extractor = (
         GlobalDescriptorExtractor() if getattr(base_cfg, "retrieval", None) and base_cfg.retrieval.enabled else None
     )
-    stereo_ba_baseline = rectifier.baseline if getattr(base_cfg.mapping, "stereo_ba_enabled", False) else None
+    # Default True: measured to help substantially wherever tested this session - see
+    # build_map.py's matching default.
+    stereo_ba_baseline = rectifier.baseline if getattr(base_cfg.mapping, "stereo_ba_enabled", True) else None
 
     mapper = OfflineMapper(base_cfg, rectifier, global_extractor=global_extractor)
 

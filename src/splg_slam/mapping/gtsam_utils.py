@@ -1,3 +1,4 @@
+import gtsam
 import numpy as np
 from gtsam import Pose3, Rot3
 
@@ -34,3 +35,13 @@ def confidence_scaled_sigma(
     the whole graph outright."""
     scale = max(floor_scale, min(1.0, (min_inliers / max(num_inliers, 1)) ** 0.5))
     return base_sigma * scale
+
+
+def make_loop_edge_noise(trans_sigma: float, rot_sigma_deg: float, num_inliers: int, min_inliers: int):
+    """Confidence-scaled, Huber-robust noise model for a verified loop-closure
+    BetweenFactorPose3 edge - shared by local_ba's and pose_graph's optimizers so the two
+    stay in sync by construction instead of by hand-copying."""
+    trans_sigma = confidence_scaled_sigma(trans_sigma, num_inliers, min_inliers)
+    rot_sigma = confidence_scaled_sigma(rot_sigma_deg, num_inliers, min_inliers)
+    base_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([np.radians(rot_sigma)] * 3 + [trans_sigma] * 3))
+    return gtsam.noiseModel.Robust.Create(gtsam.noiseModel.mEstimator.Huber.Create(1.0), base_noise)

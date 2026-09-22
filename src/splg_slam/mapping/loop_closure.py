@@ -6,6 +6,7 @@ from splg_slam.geometry.pnp import solve_pnp_ransac
 from splg_slam.geometry.stereo import StereoRectifier
 from splg_slam.localization.retrieval import GlobalDescriptorIndex
 from splg_slam.map.world_map import WorldMap
+from splg_slam.mapping.pose_graph import odometry_arc_length_m
 
 
 class LoopConsistencyTracker:
@@ -46,6 +47,14 @@ class LoopConsistencyTracker:
                     return True
                 return False
 
+        if self.required_confirmations <= 1:
+            # A brand-new candidate never reaches the existing-entry branch above (there's
+            # nothing pending yet to match against), so required_confirmations==1 has to be
+            # accepted right here on the first hit - otherwise this setting is silently
+            # indistinguishable from a >=2 threshold (see below: every first hit always fell
+            # through to the "add to pending, return False" path regardless of this setting).
+            return True
+
         self._pending.append({
             "candidate_kf": candidate_kf_id, "last_current_kf": current_kf_id, "count": 1, "rel": rel,
         })
@@ -59,6 +68,7 @@ def detect_loop_candidates(
     min_id_gap: int = 30,
     top_k: int = 3,
     min_similarity: float = 0.5,
+    min_arc_length_m: float = 0.0,
 ) -> list[tuple[int, float]]:
     """Retrieval-only candidate recall: excludes keyframes within `min_id_gap` of the
     current one so ordinary local covisibility isn't mistaken for a loop.
@@ -69,16 +79,48 @@ def detect_loop_candidates(
     40-50% worse across the board. These scenes get traversed many times on purpose, so
     several keyframes from different earlier passes over the *same* real place routinely
     score near-identically - that's an expected multi-match, not aliasing, and the margin
-    check couldn't tell the two apart. Reverted.)"""
+    check couldn't tell the two apart. Reverted.)
+
+    `min_id_gap` alone is a *keyframe-count* exclusion, not a *distance* one - during slow
+    or repetitive local motion (many keyframes inserted while barely translating, e.g. a
+    careful scan or several passes over a small area), a candidate can sit well outside
+    min_id_gap while the camera has only physically moved a meter or two since then. That
+    isn't a "loop" in any useful sense (there's essentially no drift for a closure to
+    correct over that short a span), just wasted PnP/fuse/pose-graph-rebuild work - measured
+    on one dataset: 90% of confirmed closures spanned under 2m of real arc length despite a
+    median 44-keyframe id gap. `min_arc_length_m` (0 = disabled, matching the old behavior
+    for any caller not yet updated) filters candidates by the actual keyframe-chain arc
+    length to `current_kf_id`, which `min_id_gap` was never a reliable proxy for.
+
+    Only applied to same-Atlas-segment candidates. odometry_arc_length_m walks the id-
+    sorted keyframe chain regardless of segment boundaries, so for a cross-segment pair it
+    silently sums across a re-init's arbitrary coordinate jump (a new segment's origin
+    bears no spatial relationship to where the old one had drifted to - see
+    OfflineMapper._start_new_map_segment) - a meaningless number that happened to
+    (mis)filter out a genuine cross-segment reconnection candidate in practice on one
+    dataset, permanently orphaning that segment (it's never re-offered as a fresh
+    detect_loop_candidates call once the current frame has moved past it - see
+    build_map.py's orphan-segment-reconciliation pass, which retries exactly this, but
+    still goes through this same filter). Same-segment arc length is at least physically
+    meaningful (both ends share one continuous, if drifted, coordinate frame), so it's
+    still applied there."""
     query_desc = world_map.keyframes[current_kf_id].global_descriptor
     if query_desc is None:
         return []
     exclude = {kf_id for kf_id in world_map.keyframes if abs(kf_id - current_kf_id) < min_id_gap}
-    return [
+    candidates = [
         (kf_id, sim)
         for kf_id, sim in index.query(query_desc, top_k=top_k, exclude=exclude)
         if sim >= min_similarity
     ]
+    if min_arc_length_m > 0:
+        current_segment_id = world_map.keyframes[current_kf_id].segment_id
+        candidates = [
+            (kf_id, sim) for kf_id, sim in candidates
+            if world_map.keyframes[kf_id].segment_id != current_segment_id
+            or odometry_arc_length_m(world_map, kf_id, current_kf_id) >= min_arc_length_m
+        ]
+    return candidates
 
 
 def _features_for_keyframe(world_map: WorldMap, rectifier: StereoRectifier, splg: SPLG, kf_id: int, cache: dict):

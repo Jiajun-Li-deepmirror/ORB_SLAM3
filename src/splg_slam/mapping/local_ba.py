@@ -20,8 +20,8 @@ from gtsam.symbol_shorthand import B, L, V, X
 from splg_slam.geometry.pose_utils import camera_center
 from splg_slam.map.world_map import WorldMap
 from splg_slam.mapping.gtsam_utils import (
-    confidence_scaled_sigma,
     gtsam_pose_to_cw,
+    make_loop_edge_noise,
     matrix_to_gtsam_pose3,
     pose_cw_to_body_gtsam,
     pose_cw_to_gtsam,
@@ -56,6 +56,8 @@ def local_bundle_adjustment(
     imu_factors: list[tuple[int, int, np.ndarray]] | None = None,
     imu_calib=None,
     imu_params=None,
+    lm_max_iterations: int | None = None,
+    lm_relative_error_tol: float | None = None,
 ) -> dict:
     """Refines poses of `keyframe_ids` ("free") and positions of the map points they
     observe via GTSAM Levenberg-Marquardt. Updates world_map in place. Points seen by a
@@ -115,7 +117,20 @@ def local_bundle_adjustment(
     factor above. Since GenericStereoFactor3D has no body_P_sensor support in this GTSAM
     build, X(kf_id) keeps meaning camera pose everywhere (stereo/mono factors unchanged);
     IMU states live on a separate Y(kf_id) body-pose symbol, rigidly tied to X(kf_id) via
-    a tight BetweenFactorPose3 using the known camera<-body extrinsic."""
+    a tight BetweenFactorPose3 using the known camera<-body extrinsic.
+
+    Pass `lm_max_iterations`/`lm_relative_error_tol` to cap the LM solve short of full
+    convergence - measured directly (KITTI seq04, profiling instrumentation) at a mean of
+    12 LM iterations per periodic-local-BA call against a graph of ~2000 variables/~8000
+    factors, accounting for ~65% of this function's own wall time (49s of ~70s across 83
+    calls) despite each call's initial values already being warm-started for free (world_map
+    persists the previous call's converged poses/points, so only the newly-slid-in window
+    edge is actually far from optimal). Since this same window gets re-optimized again in
+    `local_ba_every_n_kf` keyframes AND fully re-converged once more by the final global BA
+    at the end of the run, a periodic call doesn't need to fully converge every time - it
+    only needs to not drift the window noticeably worse before the next pass. Leave both
+    None (GTSAM's tight defaults, effectively full convergence) for a one-shot/final BA
+    pass where this is the only chance to get it right."""
     calib = Cal3_S2(k_rect[0, 0], k_rect[1, 1], 0.0, k_rect[0, 2], k_rect[1, 2])
     free_kf_ids = set(keyframe_ids)
 
@@ -191,12 +206,9 @@ def local_bundle_adjustment(
                 if kf_id not in free_touched and kf_id not in fixed_touched:
                     initial.insert(X(kf_id), pose_cw_to_gtsam(world_map.keyframes[kf_id].pose_cw))
                     free_touched.add(kf_id)
-            trans_sigma = confidence_scaled_sigma(loop_trans_sigma, num_inliers, loop_min_inliers)
-            rot_sigma = confidence_scaled_sigma(loop_rot_sigma_deg, num_inliers, loop_min_inliers)
-            loop_base_noise = gtsam.noiseModel.Diagonal.Sigmas(
-                np.array([np.radians(rot_sigma)] * 3 + [trans_sigma] * 3)
-            )
-            loop_noise = gtsam.noiseModel.Robust.Create(gtsam.noiseModel.mEstimator.Huber.Create(1.0), loop_base_noise)
+            # (See optimize_pose_graph's matching comment: tried also scaling this up with
+            # arc length, reverted - made things worse, not better.)
+            loop_noise = make_loop_edge_noise(loop_trans_sigma, loop_rot_sigma_deg, num_inliers, loop_min_inliers)
             graph.add(BetweenFactorPose3(X(a), X(b), matrix_to_gtsam_pose3(rel), loop_noise))
 
     if not free_touched:
@@ -251,7 +263,12 @@ def local_bundle_adjustment(
                     PriorFactorConstantBias(B(anchor_imu_id), initial.atConstantBias(B(anchor_imu_id)), tight_bias_noise)
                 )
 
-    optimizer = gtsam.LevenbergMarquardtOptimizer(graph, initial, gtsam.LevenbergMarquardtParams())
+    lm_params = gtsam.LevenbergMarquardtParams()
+    if lm_max_iterations is not None:
+        lm_params.setMaxIterations(lm_max_iterations)
+    if lm_relative_error_tol is not None:
+        lm_params.setRelativeErrorTol(lm_relative_error_tol)
+    optimizer = gtsam.LevenbergMarquardtOptimizer(graph, initial, lm_params)
     initial_error = graph.error(initial)
     result = optimizer.optimize()
 
@@ -273,7 +290,10 @@ def local_bundle_adjustment(
         world_map.keyframes[kf_id].pose_cw = pose_cw
     for pid in valid_obs:
         world_map.map_points[pid].position = np.array(result.atPoint3(L(pid)))
-    for kf_id in imu_touched:
+    # Mirror the pose write-back above: a fixed_touched keyframe's velocity/bias is
+    # tightly pinned to its initial value by the prior added in _ensure_imu_state, not
+    # actually free - write back only for keyframes whose IMU state was really optimized.
+    for kf_id in imu_touched - fixed_touched:
         world_map.keyframes[kf_id].velocity = np.array(result.atVector(V(kf_id)))
         world_map.keyframes[kf_id].imu_bias = np.array(result.atConstantBias(B(kf_id)).vector())
 

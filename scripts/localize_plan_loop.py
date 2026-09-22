@@ -18,12 +18,35 @@ from splg_slam.data.loader import dataset_dir, dataset_module
 from splg_slam.geometry.alignment import umeyama
 from splg_slam.geometry.pose_utils import camera_center
 from splg_slam.geometry.stereo import StereoRectifier
-from splg_slam.localization.continuous_localizer import ContinuousLocalizer, estimate_max_track_jump_m
+from splg_slam.localization.continuous_localizer import (
+    ContinuousLocalizer,
+    estimate_max_track_jump_m,
+    smooth_session_trajectory,
+    write_session_trajectory,
+)
 from splg_slam.map.io import load_map
+from splg_slam.mapping.imu_preintegration import make_preintegration_params
 from splg_slam.planning.dijkstra_field_2d import DijkstraField2DPlanner
 from splg_slam.planning.dstar_lite_2d import DStarLiteFallbackPlanner
 from splg_slam.planning.planner_2d import make_segment_free_check, plan_2d_with_fallback, world_to_grid
 from splg_slam.planning.trajectory import build_trajectory
+from splg_slam.utils import nearest_indices
+
+
+def load_imu_for_localizer(cfg, dmod, ddir: Path):
+    """Mirrors build_map.py's own IMU-loading block exactly (same dataset-agnostic
+    dmod.load_imu_calibration/load_imu_measurements interface, same cfg.imu.enabled gate) -
+    so pure localization gets the SAME IMU source the map was built from, with no separate
+    flag: if the config that built the map had imu.enabled, this script picks it up too.
+    Returns (imu_calib, imu_params, imu_measurements), all None if IMU is unavailable/disabled."""
+    imu_enabled = bool(getattr(cfg, "imu", None) and cfg.imu.enabled)
+    if not imu_enabled or not hasattr(dmod, "load_imu_calibration"):
+        return None, None, None
+    tf_kwargs = {"tf_static_from": cfg.dataset.tf_static_from} if getattr(cfg.dataset, "tf_static_from", None) else {}
+    imu_calib = dmod.load_imu_calibration(ddir, **tf_kwargs)
+    imu_measurements = dmod.load_imu_measurements(ddir)
+    imu_params = make_preintegration_params(imu_calib, cfg.imu.gravity_norm, cfg.imu.integration_sigma)
+    return imu_calib, imu_params, imu_measurements
 
 
 def fit_slam_to_gt(world_map, ddir: Path):
@@ -36,7 +59,7 @@ def fit_slam_to_gt(world_map, ddir: Path):
     timestamps = np.array([world_map.keyframes[i].timestamp_ns for i in kf_ids])
 
     gt_ts, gt_xyz = kitti_data.load_gt_as_xyz(ddir)
-    gt_idx = np.clip(np.searchsorted(gt_ts, timestamps), 0, len(gt_ts) - 1)
+    gt_idx = nearest_indices(gt_ts, timestamps)
     gt_matched = gt_xyz[gt_idx]
 
     r, s, t = umeyama(centers, gt_matched)
@@ -273,8 +296,12 @@ def main():
     else:
         max_track_jump_m = args.max_track_jump_m
     force_relocalize_every = args.force_relocalize_every if args.force_relocalize_every > 0 else None
+    imu_calib, imu_params, imu_measurements = load_imu_for_localizer(cfg, dmod, ddir)
+    if imu_calib is not None:
+        print("IMU dead-reckoning fallback ENABLED (cfg.imu.enabled) - a session with any real anchor will never report LOCALIZATION FAILED again.")
     localizer = ContinuousLocalizer(
         world_map, rectifier, cfg, max_track_jump_m=max_track_jump_m, force_relocalize_every=force_relocalize_every,
+        imu_calib=imu_calib, imu_params=imu_params, imu_measurements=imu_measurements,
     )
 
     checkpoint_marks = set(
@@ -302,7 +329,7 @@ def main():
         rect_l, _ = rectifier.rectify(img_l, img_r)
 
         t_loc0 = time.monotonic()
-        ok, pose_cw, info = localizer.localize(rect_l)
+        ok, pose_cw, info = localizer.localize(rect_l, timestamp_ns=e.timestamp_ns)
         t_loc1 = time.monotonic()
 
         record = {
@@ -319,7 +346,7 @@ def main():
             pos_slam = camera_center(pose_cw)
             pos_xy = (r_align @ pos_slam)[:2]
 
-            gt_i = int(np.clip(np.searchsorted(gt_ts, e.timestamp_ns), 0, len(gt_ts) - 1))
+            gt_i = int(nearest_indices(gt_ts, e.timestamp_ns))
             est_gt = s_fit * (r_fit @ pos_slam) + t_fit
             localize_accuracy_m = float(np.linalg.norm(est_gt - gt_xyz[gt_i]))
             localize_errors.append(localize_accuracy_m)
@@ -427,10 +454,21 @@ def main():
     print(
         f"Tier: {localizer.n_track} tracked (cheap, frame-to-keyframe), "
         f"{localizer.n_relocalize} full-relocalized (expensive, global retrieval), "
+        f"{localizer.n_imu_only} IMU-dead-reckoned (both track and relocalize failed), "
         f"{localizer.n_track_lost} tracking-loss events, "
         f"{localizer.n_track_jump_rejected} implausible-jump rejections, "
         f"{localizer.n_forced_relocalize} forced periodic refreshes"
     )
+
+    if localizer.session_log:
+        print("\nRunning end-of-session fixed-map trajectory smoothing "
+              f"({len(localizer.session_log)} logged frames, {localizer.n_imu_only} IMU-only)...")
+        t_smooth0 = time.monotonic()
+        corrected_poses = smooth_session_trajectory(localizer, rectifier.K_rect)
+        traj_out = out_dir / "session_trajectory.csv"
+        write_session_trajectory(localizer.session_log, corrected_poses, str(traj_out))
+        print(f"Corrected session trajectory ({len(corrected_poses)} frames) written to {traj_out} "
+              f"({time.monotonic()-t_smooth0:.1f}s)")
     loc_times_ms = np.array([r["localize_time_s"] * 1000 for r in records if r["localize_ok"]])
     if len(loc_times_ms):
         print(
@@ -461,8 +499,9 @@ def main():
     plot_summary(records, out_dir)
 
 
-def nearest_point_on_path(pos: np.ndarray, path_xy: np.ndarray) -> tuple[int, float]:
-    d = np.linalg.norm(path_xy - pos[None, :], axis=1)
+def nearest_point_on_path(pos: np.ndarray, path_pts: np.ndarray) -> tuple[int, float]:
+    """Works for both 2D and 3D paths - `path_pts` and `pos` just need matching dimensionality."""
+    d = np.linalg.norm(path_pts - pos[None, :], axis=1)
     idx = int(np.argmin(d))
     return idx, float(d[idx])
 

@@ -9,6 +9,7 @@ from eval_trajectory import load_gt, print_stats, umeyama
 
 from splg_slam.geometry.pose_utils import camera_center
 from splg_slam.map.io import load_map
+from splg_slam.utils import nearest_indices
 
 DATASETS = [
     ("mh01", "MH_01_easy"),
@@ -36,7 +37,7 @@ def main():
             kf = world_map.keyframes[kf_id]
             center_b = camera_center(kf.pose_cw)
             center_a = (t_wa_wb[:3, :3] @ center_b) + t_wa_wb[:3, 3]
-            gi = int(np.clip(np.searchsorted(gt_ts, kf.timestamp_ns), 0, len(gt_ts) - 1))
+            gi = int(nearest_indices(gt_ts, kf.timestamp_ns))
             centers.append(center_a)
             gt_matched.append(gt_xyz[gi])
         per_dataset_count[short_name] = len(world_map.keyframes)
