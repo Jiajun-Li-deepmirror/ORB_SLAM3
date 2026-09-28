@@ -285,6 +285,7 @@ def _rotation_axis_diversity(body_rotations: list[np.ndarray], pairs: list[tuple
 def _solve_and_realign(
     world_map: WorldMap, kf_ids_ordered: list[int], imu_calib: ImuCalibration, imu_params, gravity_norm: float,
     gravity_error_tolerance: float | None = None, best_gravity_error_so_far: float | None = None,
+    best_axis_diversity_so_far: float | None = None,
     solve_scale: bool = False, apply_kf_ids: list[int] | None = None, max_rotation_deg: float | None = None,
     min_rotation_axis_diversity: float | None = None,
 ) -> dict | None:
@@ -296,11 +297,21 @@ def _solve_and_realign(
 
     If `gravity_error_tolerance` is given, the solve is only *applied* (retroactive
     rotation/rescale + velocity/bias write-back) when the estimated gravity magnitude is
-    both within that relative tolerance of `gravity_norm` (a physical constant we know
+    within that relative tolerance of `gravity_norm` (a physical constant we know
     independent of any ground-truth trajectory - a basic sanity check that catches a
-    degenerate/corrupted solve) AND no worse than `best_gravity_error_so_far` (if given) -
-    letting the caller keep checking periodically without committing a correction that's
-    worse than one already applied. `diag["accepted"]` reports which happened; the solve is
+    degenerate/corrupted solve) AND (if `best_gravity_error_so_far` is given) it's a
+    Pareto-frontier improvement over history: no worse on magnitude, OR - when
+    `best_axis_diversity_so_far` is also given - strictly better on motion diversity
+    (axis_diversity below) than whatever solve set that incumbent. Comparing magnitude
+    alone (the original, `best_axis_diversity_so_far=None` behavior) lets an early,
+    low-diversity window that got lucky on magnitude permanently block every later, better-
+    conditioned solve from ever superseding it - confirmed directly on a real RealSense
+    recording: a 20-keyframe/axis_diversity=0.27 window's 0.3% error became an unbeatable
+    ratchet floor for the rest of a 110s segment, while later checks with 2-3x the motion
+    diversity and comparable magnitude were rejected purely for not numerically undercutting
+    that first lucky number, even as their own implied rotation grew from ~0.2deg to ~4deg
+    over the segment - a real, progressively accumulating drift the magnitude-only ratchet
+    had no mechanism to ever admit. `diag["accepted"]` reports which happened; the solve is
     always computed and returned either way so the caller can see how close it came.
 
     Gravity-MAGNITUDE agreement alone does not mean the estimated gravity DIRECTION is
@@ -404,9 +415,26 @@ def _solve_and_realign(
 
     accepted = True
     if gravity_error_tolerance is not None:
-        accepted = gravity_error < gravity_error_tolerance and (
-            best_gravity_error_so_far is None or gravity_error <= best_gravity_error_so_far
-        )
+        accepted = gravity_error < gravity_error_tolerance
+        if accepted and best_gravity_error_so_far is not None:
+            # Pareto-frontier ratchet, not a magnitude-only one: a later solve supersedes
+            # the incumbent if it beats it on EITHER axis - gravity-magnitude accuracy, OR
+            # motion-diversity (axis_diversity - see _rotation_axis_diversity). Comparing
+            # magnitude alone (the original behavior) lets a small, low-diversity early
+            # window "get lucky" on magnitude and then permanently block every later,
+            # better-conditioned solve from ever superseding it, even once real accumulated
+            # drift shows up - confirmed directly on a real RealSense recording: a 20-
+            # keyframe/axis_diversity=0.27 window's 0.3% error became an unbeatable ratchet
+            # floor for the REST of a 110s segment, while later checks with 2-3x the motion
+            # diversity (0.5-0.65) and comparable magnitude were rejected purely for not
+            # numerically undercutting that first lucky number, even as their own implied
+            # rotation grew from ~0.2deg to ~4deg over the segment - a real, progressively
+            # accumulating drift the ratchet had no mechanism to ever admit.
+            beats_on_magnitude = gravity_error <= best_gravity_error_so_far
+            beats_on_diversity = (
+                best_axis_diversity_so_far is not None and axis_diversity > best_axis_diversity_so_far
+            )
+            accepted = beats_on_magnitude or beats_on_diversity
     if max_rotation_deg is not None and r_align_angle_deg > max_rotation_deg:
         accepted = False
     if min_rotation_axis_diversity is not None and axis_diversity < min_rotation_axis_diversity:
@@ -473,7 +501,7 @@ def _solve_and_realign(
 def run_dynamic_imu_init(
     world_map: WorldMap, kf_ids_ordered: list[int], imu_calib: ImuCalibration, imu_params, gravity_norm: float,
     solve_scale: bool = False, gravity_error_tolerance: float | None = None,
-    min_rotation_axis_diversity: float | None = None,
+    min_rotation_axis_diversity: float | None = None, max_rotation_deg: float | None = None,
 ) -> dict | None:
     """ORB-SLAM-style motion-based IMU bootstrap: instead of assuming the sequence starts
     static, run ordinary vision-only tracking for the first `len(kf_ids_ordered)` keyframes
@@ -496,18 +524,33 @@ def run_dynamic_imu_init(
 
     Returns None (init left pending for a later attempt) if the IMU-factor chain across this
     window is entirely missing, or if the solve was computed but not accepted by any of
-    _solve_and_realign's checks - gravity_error_tolerance (mono only, by default), or
-    min_rotation_axis_diversity (either mode, if given). Checking diag["accepted"]
-    unconditionally (not just when gravity_error_tolerance is set) matters once
-    min_rotation_axis_diversity is in play: for stereo (gravity_error_tolerance=None),
-    _solve_and_realign still returns a non-None diag on a diversity-rejected solve (it
-    just skips applying it) - treating that as "done" here instead of "still pending"
-    would leave the segment permanently stuck at its provisional pose, believing
-    (incorrectly) that it had already been corrected."""
+    _solve_and_realign's checks - gravity_error_tolerance (mono only, by default),
+    min_rotation_axis_diversity, or max_rotation_deg (either mode, if given). Checking
+    diag["accepted"] unconditionally (not just when gravity_error_tolerance is set) matters
+    once min_rotation_axis_diversity/max_rotation_deg are in play: for stereo
+    (gravity_error_tolerance=None), _solve_and_realign still returns a non-None diag on a
+    diversity- or rotation-rejected solve (it just skips applying it) - treating that as
+    "done" here instead of "still pending" would leave the segment permanently stuck at its
+    provisional pose, believing (incorrectly) that it had already been corrected.
+
+    max_rotation_deg=None is the right default HERE specifically for the segment's very
+    first bootstrap call (kf_ids_ordered starting at the segment's own first keyframe, no
+    prior alignment yet) - see _solve_and_realign's own docstring on why a large rotation is
+    legitimate exactly once, establishing that first alignment. A caller re-using this same
+    function to REFINE an already-aligned segment later (e.g. build_map.py's kf20-refine/
+    VIBA1/VIBA2 under orbslam3_style_init) should pass this explicitly, mirroring
+    run_periodic_imu_reinit's own use of the same check - measured directly as a real,
+    non-hypothetical gap: a kf20-refine/VIBA1 pair that both passed a 0.3% gravity-magnitude
+    check nonetheless baked in a ~3.2 degree tilt (confirmed via a plane fit through the
+    whole segment's own keyframe positions explaining 78% of its Z variance) - magnitude
+    agreement alone doesn't catch a bad DIRECTION, exactly per this function's and
+    _solve_and_realign's own long-standing warning, but until this parameter existed here
+    there was no way for this refine path to use the same rotation-magnitude check
+    run_periodic_imu_reinit already had."""
     diag = _solve_and_realign(
         world_map, kf_ids_ordered, imu_calib, imu_params, gravity_norm,
         gravity_error_tolerance=gravity_error_tolerance, solve_scale=solve_scale,
-        min_rotation_axis_diversity=min_rotation_axis_diversity,
+        min_rotation_axis_diversity=min_rotation_axis_diversity, max_rotation_deg=max_rotation_deg,
     )
     if diag is not None and not diag["accepted"]:
         return None
@@ -518,7 +561,7 @@ def run_periodic_imu_reinit(
     world_map: WorldMap, kf_ids_ordered: list[int], imu_calib: ImuCalibration, imu_params, gravity_norm: float,
     gravity_error_tolerance: float, best_gravity_error_so_far: float | None, solve_scale: bool = False,
     apply_kf_ids: list[int] | None = None, max_rotation_deg: float | None = None,
-    min_rotation_axis_diversity: float | None = None,
+    min_rotation_axis_diversity: float | None = None, best_axis_diversity_so_far: float | None = None,
 ) -> dict | None:
     """ORB-SLAM3 VIBA-style staged re-optimization: redo the same gravity/bias/velocity
     solve later, with much more accumulated motion diversity available by then than the
@@ -549,10 +592,17 @@ def run_periodic_imu_reinit(
     whose implied rotation is itself larger than this, since periodic reinit only ever runs
     once the segment already has some (bootstrap-established) gravity alignment, so a
     solve claiming it needs to rotate the world by more than a few degrees to "fix" that is
-    itself suspicious rather than obviously an improvement."""
+    itself suspicious rather than obviously an improvement.
+
+    `best_axis_diversity_so_far`, if given alongside `best_gravity_error_so_far`, makes the
+    ratchet a Pareto frontier over BOTH gravity-magnitude accuracy and motion diversity
+    instead of magnitude alone - see _solve_and_realign's own docstring on why a magnitude-
+    only ratchet lets an early, low-diversity, "lucky" window permanently block every later,
+    better-conditioned solve from ever superseding it, even as real drift accumulates."""
     return _solve_and_realign(
         world_map, kf_ids_ordered, imu_calib, imu_params, gravity_norm,
         gravity_error_tolerance=gravity_error_tolerance, best_gravity_error_so_far=best_gravity_error_so_far,
+        best_axis_diversity_so_far=best_axis_diversity_so_far,
         solve_scale=solve_scale, apply_kf_ids=apply_kf_ids, max_rotation_deg=max_rotation_deg,
         min_rotation_axis_diversity=min_rotation_axis_diversity,
     )

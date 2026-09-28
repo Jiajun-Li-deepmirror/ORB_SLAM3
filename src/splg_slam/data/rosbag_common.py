@@ -30,12 +30,22 @@ GYRO_TOPIC = "/camera/camera/gyro/sample"
 ACCEL_TOPIC = "/camera/camera/accel/sample"
 DEPTH_TOPIC = "/camera/camera/depth/image_rect_raw"
 
-# Typical Bosch BMI055-class MEMS IMU values (RealSense D4xx-family datasheets) - neither
-# bag carries an IMU calibration report, so these are approximate placeholders.
-IMU_GYRO_NOISE_DENSITY = 1.6e-4
-IMU_GYRO_RANDOM_WALK = 1.9e-5
-IMU_ACCEL_NOISE_DENSITY = 2.8e-3
-IMU_ACCEL_RANDOM_WALK = 8.6e-4
+# Measured via Allan variance on a real, dedicated static calibration recording (2026-09-23,
+# rosbag2_2026_09_23-07_06_50, ~14.3h stationary at these same GYRO_TOPIC/ACCEL_TOPIC topics,
+# 199.5Hz gyro / 100.6Hz accel) - RMS across x/y/z of the standard -1/2-slope (white noise,
+# read at tau=1s) / +1/2-slope (rate random walk, read at tau=3s) Allan-deviation fit.
+# Replaces the previous "typical Bosch BMI055-class MEMS IMU" datasheet placeholder, which
+# this recording shows was pessimistic on 3 of 4 values (noise_density/random_walk actually
+# measured 3-36x BETTER than the placeholder assumed - only gyro_noise_density came in
+# slightly worse, +14%). Assumes every rosbag2 recording read through this module comes from
+# the same physical camera unit as the one calibrated here - if a different physical D4xx
+# unit is ever used, these should be re-measured rather than reused (unit-to-unit MEMS
+# variation is real and can be substantial), e.g. via a fresh multi-hour static recording
+# fed through the same Allan-variance analysis.
+IMU_GYRO_NOISE_DENSITY = 1.831275e-04
+IMU_GYRO_RANDOM_WALK = 2.158951e-06
+IMU_ACCEL_NOISE_DENSITY = 8.570783e-04
+IMU_ACCEL_RANDOM_WALK = 2.403472e-05
 
 
 def stamp_to_ns(stamp) -> int:

@@ -554,6 +554,29 @@ class OfflineMapper:
 
         if self.ref_keyframe is None:
             pose_cw0 = np.eye(4)
+            if not self.imu_enabled:
+                # No IMU at all: there's no way to measure true gravity direction, so this
+                # can't be a real gravity alignment - but the bootstrap keyframe's pose was
+                # about to be left at np.eye(4), which defines world = camera0's own OPTICAL
+                # frame (X=right, Y=down, Z=forward - the standard CV camera convention).
+                # That makes the map's "Z" axis whatever direction the camera lens pointed
+                # at t=0, typically close to HORIZONTAL for a handheld device held up and
+                # aimed forward - not vertical at all, so comparing it to a "should stay near
+                # 0" height expectation is comparing apples to oranges (confirmed directly:
+                # measured ~80deg between this Z axis and true gravity on a real recording).
+                # This fixed, constant rotation just relabels axes - world X=forward (camera
+                # Z), Y=left (-camera X), Z=up (-camera Y) - matching this codebase's existing
+                # Z-up convention (see gravity_alignment_rotation's own docstring) elsewhere,
+                # WITHOUT touching or requiring any IMU data. It only makes "up" mean the
+                # right thing when the camera was ALSO physically held roughly level and
+                # forward-facing at t=0 (a reasonable but unverified assumption for typical
+                # handheld use) - unlike real gravity alignment, it can't correct for the
+                # camera actually being tilted at the start, since nothing here measures that.
+                pose_cw0[:3, :3] = np.array([
+                    [0.0, -1.0, 0.0],
+                    [0.0, 0.0, -1.0],
+                    [1.0, 0.0, 0.0],
+                ])
             if self.imu_enabled:
                 # World frame is defined by this bootstrap keyframe, so its orientation
                 # fixes gravity's direction in world frame for every later IMU factor (or,

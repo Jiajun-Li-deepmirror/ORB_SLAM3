@@ -86,11 +86,19 @@ class Relocalizer:
         return entry
 
     def localize(
-        self, rect_img_left: np.ndarray, top_k: int = 5, query_feats: dict | None = None,
+        self, rect_img_left: np.ndarray, top_k: int | None = None, query_feats: dict | None = None,
     ) -> tuple[bool, np.ndarray | None, dict]:
         """`query_feats`: reuse an already-extracted SPLG feature dict (e.g. from a caller
         that just tried frame-to-frame tracking with it and fell through here on failure)
-        instead of paying for a second SuperPoint pass over the same image."""
+        instead of paying for a second SuperPoint pass over the same image.
+
+        `top_k` (None, the default): falls back to `cfg.tracking.relocalization_top_k` -
+        this used to be a hardcoded 5 regardless of that config field (a real inconsistency:
+        the same-named field IS wired up for mapping-time relocalization in tracker.py, just
+        never read here), so setting it in a config silently did nothing for this class.
+        Pass an explicit int to override the config for this one call."""
+        if top_k is None:
+            top_k = getattr(self.cfg.tracking, "relocalization_top_k", 5)
         if query_feats is None:
             query_feats = self.splg.extract(rect_img_left)
         kpts_q, _ = SPLG.to_frame_arrays(query_feats)

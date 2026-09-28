@@ -31,6 +31,20 @@ imu:
   init_gyro_static_threshold: 0.05     # rad/s; below this -> static init, else ORB-SLAM-style dynamic init
   init_dynamic_window_kf: 10           # keyframes collected before solving the dynamic-init closed-form system
   t_cam0_body_override: null           # set a 4x4 matrix here only if the rig's own IMU-cam extrinsic is known bad
+  # Warm-start prior for tracker.py's _imu_bias_prior (see its own docstring): the bootstrap/
+  # dynamic-init solve's starting guess for THIS unit, instead of an assumed-zero bias - the
+  # online solve (dynamic bootstrap + periodic reinit/VIBA) still re-estimates from scratch
+  # every session, this only affects convergence speed and the very first few keyframes
+  # before that solve has run. gyro_bias_prior is from this unit's own 14.3h static Allan-
+  # variance recording (2026-09-23, rosbag2_2026_09_23-07_06_50) - a gyro reads true angular
+  # rate regardless of orientation, so a single-orientation static recording gives a clean,
+  # well-averaged bias estimate. accel_bias_prior is left null: a single-orientation static
+  # recording can't cleanly separate true accelerometer bias from gravity (needs a multi-
+  # orientation solve, which this unit's Intel factory accel calibration already does and
+  # applies directly in firmware as of the same date - so the raw accel stream itself should
+  # already be close to bias-free, a software prior on top would risk double-correcting).
+  gyro_bias_prior: [0.0020944, 0.0017194, 0.0007398]   # rad/s
+  accel_bias_prior: null                                # m/s^2 - see comment above
   calibration_yaml: null               # path to a flat YAML with accelerometer/gyroscope_noise_density/random_walk keys (EuRoC sensor.yaml or Kalibr imu.yaml format) - overrides the RealSense-placeholder defaults below
   gyro_noise_density_override: null     # rad/s/sqrt(Hz), applied after calibration_yaml
   gyro_random_walk_override: null       # rad/s^2/sqrt(Hz)

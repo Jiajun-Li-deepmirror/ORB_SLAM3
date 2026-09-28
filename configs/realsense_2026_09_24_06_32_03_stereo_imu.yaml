@@ -1,6 +1,6 @@
 dataset:
   kind: rosbag2
-  bag_dir: /home/dm/slam_ws/datasets/realsense/rosbag2_2026_09_20-04_54_15
+  bag_dir: /home/dm/slam_ws/datasets/realsense/rosbag2_2026_09_24-06_32_03
   frame_stride: 1
   max_frames: null
   use_sensor_depth: false
@@ -139,4 +139,4 @@ loop_closure:
   pending_timeout_kf: 40
 
 output:
-  map_dir: /home/dm/slam_ws/results/realsense/2026_09_20_04_54_15_stereo_imu
+  map_dir: /home/dm/slam_ws/results/realsense/2026_09_24_06_32_03_stereo_imu

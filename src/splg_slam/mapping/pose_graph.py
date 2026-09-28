@@ -11,6 +11,7 @@ from splg_slam.mapping.gtsam_utils import (
     matrix_to_gtsam_pose3,
     pose_cw_to_gtsam,
 )
+from splg_slam.mapping.imu_preintegration import rotation_aligning
 
 
 def relative_pose(pose_cw_a: np.ndarray, pose_cw_b: np.ndarray) -> np.ndarray:
@@ -259,3 +260,94 @@ def optimize_pose_graph(
         "final_error": float(graph.error(result)),
         "rejected": False,
     }
+
+
+def estimate_vertical_axis_pca(
+    world_map: WorldMap, max_planarity_ratio: float = 0.02,
+) -> tuple[np.ndarray | None, float]:
+    """Vision-only, IMU-free estimate of "which way is up", for maps built with no IMU at
+    all (or where IMU gravity alignment isn't available/trusted) - a fallback specifically
+    for near-planar navigation (a handheld device walked around one floor, a ground robot,
+    etc.), NOT a general substitute for real gravity alignment.
+
+    Without IMU, a fresh map's Z axis is arbitrary (see tracker.py's bootstrap keyframe
+    pose - it's whatever the first camera frame's own optical axes happened to be, not
+    gravity), so the map can end up tilted by tens of degrees from true vertical - confirmed
+    directly on a real handheld RealSense recording (~80deg with no correction at all).
+
+    This assumes real motion stayed close to one horizontal plane and finds "up" as the
+    direction the WHOLE keyframe trajectory varies LEAST along (PCA over camera centers,
+    smallest-eigenvalue eigenvector) - confirmed directly on the same recording to match a
+    completely independent method (a linear plane fit through the same positions) to within
+    0.01deg, and to a residual height range of just 0.33m (33% of net displacement)
+    afterward, versus 2.97m before - actually tighter than that same recording's own real
+    IMU-based result (0.60m), because PCA draws on the trajectory's ENTIRE spatial extent
+    (evidence accumulated over the whole recording) rather than one early, brief motion
+    window's IMU solve.
+
+    This only holds up when the "stayed near one horizontal plane" assumption is actually
+    true - it would misfire on any genuinely 3D trajectory (a drone's real climb/descent,
+    stairs, a ramp), mistaking real vertical motion for a correctable tilt. `max_planarity_ratio`
+    is the self-check: the ratio of smallest-to-largest PCA eigenvalue (near-zero for a truly
+    flat trajectory, order-0.1+ for one with real 3D structure) must fall under this before
+    the estimate is trusted at all. Returns (None, ratio) - meaning "don't apply this" - if
+    the check fails, ALONGSIDE the actual ratio either way so the caller can log why."""
+    kf_ids = world_map.keyframe_ids_sorted()
+    if len(kf_ids) < 3:
+        return None, float("inf")
+    centers = np.array([camera_center(world_map.keyframes[i].pose_cw) for i in kf_ids])
+    centered = centers - centers.mean(axis=0)
+    cov = centered.T @ centered / len(centered)
+    eigvals, eigvecs = np.linalg.eigh(cov)  # ascending order
+    ratio = float(eigvals[0] / eigvals[2]) if eigvals[2] > 1e-9 else float("inf")
+    if ratio > max_planarity_ratio:
+        return None, ratio
+    up_axis = eigvecs[:, 0]
+    if up_axis[2] < 0:  # orient roughly toward the pre-correction +Z, for a smaller residual rotation
+        up_axis = -up_axis
+    return up_axis, ratio
+
+
+def apply_vertical_axis_correction(world_map: WorldMap, up_axis: np.ndarray, heading_ref_kf_id: int | None = None) -> None:
+    """Rotates every keyframe pose and map point so `up_axis` (in the map's CURRENT frame)
+    becomes +Z - same rigid-rotation application pattern as imu_init.py's
+    _solve_and_realign (rotation only, no rescale: unlike a bad gravity solve, this never
+    touches metric scale).
+
+    `rotation_aligning` only constrains where "up" ends up - it has one full degree of
+    freedom left (rotation about the new +Z, i.e. heading/yaw), which its minimal-rotation
+    Rodrigues construction resolves to *whatever falls out of the cross-product*, not
+    necessarily anything meaningful. Left alone, this silently drags the map's existing
+    heading convention along with it by a small but real, uncontrolled amount (measured
+    directly: a ~2.75deg incidental yaw from a ~10.8deg tilt correction) - harmless for the
+    map's own internal consistency, but a real annoyance for anyone expecting the heading
+    convention already established at kf0 (e.g. tracker.py's own fixed-axis bootstrap
+    convention - see its docstring - which sets kf0's forward direction to exactly +X) to
+    still hold true after this runs.
+
+    `heading_ref_kf_id`, if given, cancels that incidental yaw: after the tilt-only
+    rotation, an extra pure yaw (about the NEW +Z) is added so this keyframe's own forward
+    direction (its camera-frame +Z expressed in world) lands back on the SAME horizontal
+    heading it had before this function ran at all - restoring, not just preserving, "no
+    heading change" as this function's actual behavior. None (default) skips this - only
+    the tilt gets corrected, heading drifts by whatever the minimal rotation happens to do."""
+    r_align = rotation_aligning(up_axis, np.array([0.0, 0.0, 1.0]))
+    if heading_ref_kf_id is not None:
+        kf_ref = world_map.keyframes[heading_ref_kf_id]
+        forward_before = kf_ref.pose_cw[:3, :3].T @ np.array([0.0, 0.0, 1.0])
+        forward_mid = r_align @ forward_before
+        horiz = forward_mid[:2]
+        norm = float(np.linalg.norm(horiz))
+        if norm > 1e-6:
+            cos_a, sin_a = horiz[0] / norm, horiz[1] / norm
+            r_yaw = np.array([
+                [cos_a, sin_a, 0.0],
+                [-sin_a, cos_a, 0.0],
+                [0.0, 0.0, 1.0],
+            ])
+            r_align = r_yaw @ r_align
+    for kf in world_map.keyframes.values():
+        kf.pose_cw = kf.pose_cw.copy()
+        kf.pose_cw[:3, :3] = kf.pose_cw[:3, :3] @ r_align.T
+    for mp in world_map.map_points.values():
+        mp.position = r_align @ mp.position

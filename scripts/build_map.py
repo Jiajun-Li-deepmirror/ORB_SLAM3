@@ -33,6 +33,8 @@ from splg_slam.mapping.loop_closure import (
     verify_loop_candidate,
 )
 from splg_slam.mapping.pose_graph import (
+    apply_vertical_axis_correction,
+    estimate_vertical_axis_pca,
     odometry_arc_length_m,
     optimize_pose_graph,
     relative_pose,
@@ -548,6 +550,11 @@ def main():
     # reinit_segment_id/next_reinit_check_kf whenever a new segment starts (a fresh segment's
     # best-so-far has no relation to a prior segment's).
     reinit_best_gravity_error: float | None = None
+    # Tracked alongside reinit_best_gravity_error to make the ratchet a Pareto frontier over
+    # BOTH gravity-magnitude accuracy and motion diversity, not magnitude alone - see
+    # _solve_and_realign's own docstring on why a magnitude-only ratchet lets an early, low-
+    # diversity "lucky" window permanently block every later, better-conditioned solve.
+    reinit_best_axis_diversity: float | None = None
     # EXPERIMENTAL (env-gated, "Option D"): the ratchet above protects against accepting a
     # worse correction, but has no way to "try again" once a segment's best-ever result is
     # locked in - a long segment with no later comparably-diverse window just accumulates
@@ -668,6 +675,7 @@ def main():
                     reinit_segment_id = mapper._current_segment_id
                     next_reinit_check_kf = n_keyframes - 1 + getattr(cfg.imu, "reinit_min_kf", 20)
                     reinit_best_gravity_error = None
+                    reinit_best_axis_diversity = None
                     last_reinit_accept_kf = n_keyframes - 1
                     next_dynamic_init_check_kf = n_keyframes - 1 + getattr(cfg.imu, "init_dynamic_window_kf", 10)
                     segment_start_ns = e.timestamp_ns
@@ -764,6 +772,7 @@ def main():
                             "against the fixed gravity_error_tolerance"
                         )
                         reinit_best_gravity_error = None
+                        reinit_best_axis_diversity = None
                     viba_stage = None
                     if (
                         orbslam3_style_init and not kf20_refine_done
@@ -791,7 +800,36 @@ def main():
                         diag = run_dynamic_imu_init(
                             mapper.world_map, segment_kf_ids, imu_calib, imu_params, cfg.imu.gravity_norm,
                             solve_scale=mono_mode,
+                            # Unlike the ORIGINAL kf10 bootstrap call above (intentionally
+                            # unconditional - see its own docstring: a bad bootstrap there still
+                            # gets a later correction chance), this kf20-refine/VIBA1/VIBA2 chain
+                            # (below too) IS that later chance under orbslam3_style_init - the
+                            # plain ratchet-gated periodic reinit path never runs once this mode
+                            # is active (see the final `else` branch's own comment: unreachable
+                            # here). With no gate at all, a single bad solve anywhere in this
+                            # chain was permanent for the rest of the segment - measured directly
+                            # on the RealSense run that validated this mode as the project
+                            # default: one VIBA2 call landed on |g| error 16.0% with an
+                            # accel_bias of [-0.21, -1.58, -0.05] m/s^2 (order-of-magnitude
+                            # implausible) and got applied anyway, since nothing here ever
+                            # checked. Reusing reinit_gravity_tolerance (the same physical
+                            # gravity-magnitude sanity check the plain path already trusts)
+                            # rejects a solve this bad instead: it's left pending, keeping
+                            # whatever bias the segment already had (from the kf10 bootstrap, or
+                            # nothing solved at all yet - not obviously worse than committing to
+                            # a wrong one).
+                            gravity_error_tolerance=reinit_gravity_tolerance,
                             min_rotation_axis_diversity=min_rotation_axis_diversity,
+                            # Catches the OTHER half of the "bad solve" failure mode the
+                            # gravity_error_tolerance fix above doesn't: magnitude agreement
+                            # alone doesn't mean the DIRECTION is right (see run_dynamic_imu_init's
+                            # own docstring) - measured directly on a real RealSense recording,
+                            # a kf20-refine + VIBA1 pair that both passed a 0.3% gravity-magnitude
+                            # check still baked in a ~3.2deg tilt (confirmed via a plane fit
+                            # through the segment's own keyframe positions explaining 78% of its
+                            # Z variance). run_periodic_imu_reinit already had this same check;
+                            # it just wasn't wired through run_dynamic_imu_init until now.
+                            max_rotation_deg=reinit_max_rotation_deg,
                         )
                     elif orbslam3_style_init and reinit_call_count >= 2:
                         # VIBA2 already fired for this segment - ORB-SLAM3 never calls
@@ -833,7 +871,12 @@ def main():
                         diag = run_dynamic_imu_init(
                             mapper.world_map, segment_kf_ids, imu_calib, imu_params, cfg.imu.gravity_norm,
                             solve_scale=mono_mode,
+                            # See the matching comment on the kf20-refine call above - same fix,
+                            # same reason (this is VIBA2's own permanent-once-applied risk: it's
+                            # the LAST closed-form correction this segment will ever get).
+                            gravity_error_tolerance=reinit_gravity_tolerance,
                             min_rotation_axis_diversity=min_rotation_axis_diversity,
+                            max_rotation_deg=reinit_max_rotation_deg,  # see matching comment on the kf20-refine call above
                         )
                     else:
                         # Scoped to the current segment only (same reasoning as init_window
@@ -866,12 +909,30 @@ def main():
                             mapper.world_map, window_kf_ids, imu_calib, imu_params, cfg.imu.gravity_norm,
                             gravity_error_tolerance=reinit_gravity_tolerance,
                             best_gravity_error_so_far=None if os.environ.get("DISABLE_RATCHET") else reinit_best_gravity_error,
+                            best_axis_diversity_so_far=None if os.environ.get("DISABLE_RATCHET") else reinit_best_axis_diversity,
                             solve_scale=mono_mode, apply_kf_ids=segment_kf_ids,
                             max_rotation_deg=reinit_max_rotation_deg,
                             min_rotation_axis_diversity=min_rotation_axis_diversity,
                         )
                     if diag is None:
-                        if orbslam3_style_init and reinit_call_count >= 2:
+                        if viba_stage is not None:
+                            # A kf20-refine/VIBA1/VIBA2 solve WAS just attempted this call (see
+                            # gravity_error_tolerance added to those run_dynamic_imu_init calls
+                            # above) and got rejected by the same sanity check the plain path
+                            # trusts - report this distinctly from the "not yet due"/"already
+                            # done" cases below (checked first: reinit_call_count is already
+                            # bumped past 2 by the time a VIBA2 attempt lands here, so that
+                            # branch would otherwise misreport a real rejection as routine
+                            # silence). Segment's bias/gravity/scale are left exactly as they
+                            # were before this call - not applying a bad solve, not "stuck", the
+                            # segment simply keeps whatever it already had.
+                            print(
+                                f"  {viba_stage} @ {n_keyframes}kf: solve computed but REJECTED "
+                                "(failed gravity-magnitude / implied-rotation-angle / "
+                                "rotation-diversity sanity check) - not applied, segment's "
+                                "bias/gravity left unchanged"
+                            )
+                        elif orbslam3_style_init and reinit_call_count >= 2:
                             pass  # VIBA1/VIBA2 both already done for this segment - silent from here on, matching ORB-SLAM3's own one-shot-per-stage behavior
                         elif orbslam3_style_init:
                             pass  # not yet VIBA1's/VIBA2's scheduled elapsed-time - silent, will fire once due
@@ -893,7 +954,17 @@ def main():
                         )
                     elif diag["accepted"]:
                         just_reinitialized = True
-                        reinit_best_gravity_error = diag["gravity_error"]
+                        # min/max (not plain overwrite): keeps both frontiers of the Pareto
+                        # ratchet monotonically non-regressing regardless of WHICH axis let
+                        # this particular solve in - see _solve_and_realign's docstring.
+                        reinit_best_gravity_error = (
+                            diag["gravity_error"] if reinit_best_gravity_error is None
+                            else min(reinit_best_gravity_error, diag["gravity_error"])
+                        )
+                        reinit_best_axis_diversity = (
+                            diag["rotation_axis_diversity"] if reinit_best_axis_diversity is None
+                            else max(reinit_best_axis_diversity, diag["rotation_axis_diversity"])
+                        )
                         last_reinit_accept_kf = n_keyframes
                         last_accepted_bias[mapper._current_segment_id] = np.concatenate(
                             [diag["accel_bias"], diag["gyro_bias"]]
@@ -1437,6 +1508,34 @@ def main():
             f"{len(mapper.world_map.loop_edges)} loop edges, {stats['num_outliers_removed']} outlier obs removed): "
             f"error {stats['initial_error']:.1f} -> {stats['final_error']:.1f} ({time.monotonic() - t0:.1f}s)"
         )
+
+    # Vision-only, IMU-free vertical-axis fallback (see pose_graph.estimate_vertical_axis_pca's
+    # own docstring for the full rationale/caveats) - only relevant when there's no IMU-based
+    # gravity alignment to trust in the first place: with IMU enabled, the map's Z axis is
+    # already a real, measured gravity estimate (however imperfect - see this project's own
+    # extensive IMU-init tuning), and this near-planar-motion assumption is no substitute for
+    # that. Default ON (only under imu.enabled=false) since it's a pure improvement when its
+    # own self-check (max_planarity_ratio) passes, and a no-op (explicitly skipped, logged)
+    # when it doesn't - never applied blindly.
+    if not imu_enabled and getattr(cfg.mapping, "vertical_axis_pca_correction", True):
+        max_ratio = getattr(cfg.mapping, "vertical_axis_pca_max_planarity_ratio", 0.02)
+        up_axis, ratio = estimate_vertical_axis_pca(mapper.world_map, max_planarity_ratio=max_ratio)
+        if up_axis is not None:
+            angle_deg = float(np.degrees(np.arccos(np.clip(up_axis[2], -1.0, 1.0))))
+            first_kf_id = mapper.world_map.keyframe_ids_sorted()[0]
+            apply_vertical_axis_correction(mapper.world_map, up_axis, heading_ref_kf_id=first_kf_id)
+            print(
+                f"  vertical-axis PCA correction: applied ({angle_deg:.2f}deg rotation, "
+                f"planarity ratio {ratio:.5f} <= {max_ratio}) - no IMU gravity alignment was "
+                "available, so this vision-only near-planar-motion fallback was used instead"
+            )
+        else:
+            print(
+                f"  vertical-axis PCA correction: SKIPPED (planarity ratio {ratio:.5f} > "
+                f"{max_ratio} - trajectory doesn't look near-planar enough to trust this "
+                "vision-only fallback; map's Z axis is left as whatever the bootstrap "
+                "keyframe's own camera orientation happened to be)"
+            )
 
     out_path = Path(cfg.output.map_dir) / "map.pkl"
     save_map(mapper.world_map, out_path)
