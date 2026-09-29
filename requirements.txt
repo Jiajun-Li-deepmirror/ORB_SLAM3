@@ -12,3 +12,5 @@ tqdm
 open3d
 lightglue @ git+https://github.com/cvg/LightGlue.git
 gtsam
+rosbags
+octomap-python
