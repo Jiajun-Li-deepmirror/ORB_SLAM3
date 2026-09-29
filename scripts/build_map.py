@@ -589,9 +589,19 @@ def main():
 
     entries = dmod.load_mono_frames(ddir) if mono_mode else dmod.load_stereo_frames(ddir)
     stride = cfg.dataset.frame_stride or 1
+    # skip_frames: drops this many leading frames (BEFORE stride/max_frames apply) - for
+    # discarding a bad start-of-recording artifact (e.g. the operator still panning the
+    # camera into position when recording started - confirmed directly on a real dataset:
+    # frame 0 and frame 15 showed two completely different, unrelated scenes ~90+ degrees
+    # apart) that would otherwise become kf0 and immediately break tracking for everything
+    # after it. Image-side only: imu.init_static_samples's own leading-static-window search
+    # (choose_imu_init_mode) still reads from the raw IMU stream's true start, not from
+    # this skip point - fine for pure-stereo (no-IMU) use, but means IMU-mode init may still
+    # search over the discarded/bad interval - not addressed here.
+    skip_frames = getattr(cfg.dataset, "skip_frames", 0) or 0
     if isinstance(entries, list):
         # euroc/kitti: a concrete, already-decoded-path list - slicing gives an exact count.
-        entries = entries[::stride]
+        entries = entries[skip_frames:][::stride]
         if cfg.dataset.max_frames:
             entries = entries[: cfg.dataset.max_frames]
         n_entries = len(entries)
@@ -600,14 +610,14 @@ def main():
         # EuRoC-layout copy on disk) - itertools.islice applies the same stride/limit
         # without needing a len(). The frame count for the progress print below is only
         # a best-effort estimate from the bag's own metadata, since a generator has no len().
-        entries = itertools.islice(entries, 0, None, stride)
+        entries = itertools.islice(entries, skip_frames, None, stride)
         if cfg.dataset.max_frames:
             entries = itertools.islice(entries, cfg.dataset.max_frames)
         n_entries = None
         if hasattr(dmod, "expected_frame_count"):
             raw_count = dmod.expected_frame_count(ddir, mono_mode)
             if raw_count is not None:
-                n_entries = len(range(0, raw_count, stride))
+                n_entries = len(range(skip_frames, raw_count, stride))
                 if cfg.dataset.max_frames:
                     n_entries = min(n_entries, cfg.dataset.max_frames)
 
@@ -803,11 +813,12 @@ def main():
                             # Unlike the ORIGINAL kf10 bootstrap call above (intentionally
                             # unconditional - see its own docstring: a bad bootstrap there still
                             # gets a later correction chance), this kf20-refine/VIBA1/VIBA2 chain
-                            # (below too) IS that later chance under orbslam3_style_init - the
-                            # plain ratchet-gated periodic reinit path never runs once this mode
-                            # is active (see the final `else` branch's own comment: unreachable
-                            # here). With no gate at all, a single bad solve anywhere in this
-                            # chain was permanent for the rest of the segment - measured directly
+                            # is the ONLY correction chance for as long as it's still running
+                            # under orbslam3_style_init (the ratchet-gated periodic reinit path
+                            # only takes back over once this chain finishes - see the final
+                            # `else` branch's own comment). With no gate at all here, a single
+                            # bad solve anywhere in this chain was permanent for the rest of the
+                            # segment's kf20-refine/VIBA1/VIBA2 phase - measured directly
                             # on the RealSense run that validated this mode as the project
                             # default: one VIBA2 call landed on |g| error 16.0% with an
                             # accel_bias of [-0.21, -1.58, -0.05] m/s^2 (order-of-magnitude
@@ -831,19 +842,13 @@ def main():
                             # it just wasn't wired through run_dynamic_imu_init until now.
                             max_rotation_deg=reinit_max_rotation_deg,
                         )
-                    elif orbslam3_style_init and reinit_call_count >= 2:
-                        # VIBA2 already fired for this segment - ORB-SLAM3 never calls
-                        # InitializeIMU again after this point (mbIMU_BA2 latches true);
-                        # from here on only the ongoing local-BA/tracking joint optimization's
-                        # own IMU factors refine bias/velocity, no more closed-form re-solves.
-                        diag = None
-                    elif orbslam3_style_init and (e.timestamp_ns - segment_start_ns) / 1e9 < (5.0 if reinit_call_count == 0 else 15.0):
+                    elif orbslam3_style_init and reinit_call_count < 2 and (e.timestamp_ns - segment_start_ns) / 1e9 < (5.0 if reinit_call_count == 0 else 15.0):
                         # Not yet VIBA1's (~5s) or VIBA2's (~15s) scheduled time - ORB-SLAM3
                         # times these by elapsed wall-clock since map creation, not keyframe
                         # count, so skip this keyframe-count-triggered check and wait for a
                         # later one that does fall past the time threshold.
                         diag = None
-                    elif orbslam3_style_init:
+                    elif orbslam3_style_init and reinit_call_count < 2:
                         # TRUE two-stage VIBA1/VIBA2 (not just the single-shot closed-form solve
                         # with a time-dependent Tikhonov weight this same math also supports -
                         # see imu_init.py's own elapsed_s staging comment): each stage is its own
@@ -894,13 +899,21 @@ def main():
                         # different dataset/run, pre-dating this session's other fixes) still
                         # applies as-is.
                         #
-                        # NOT reachable at all when orbslam3_style_init is True: the elif chain
-                        # above it (kf20 refine / VIBA-done / not-yet-time / VIBA1-VIBA2) has an
-                        # unconditional `elif orbslam3_style_init:` arm, so this final `else` only
-                        # ever executes for the plain (non-orbslam3_style_init) periodic reinit -
-                        # VIBA1/VIBA2's own run_dynamic_imu_init calls above build their own
-                        # `segment_kf_ids` directly (always the full, unbounded segment, by
-                        # construction, independent of this env var) and never reach here.
+                        # Also reached once orbslam3_style_init's own kf20-refine/VIBA1/VIBA2
+                        # chain has run its course (reinit_call_count >= 2, and kf20-refine
+                        # already done) - all three elif arms above are guarded off by then, so
+                        # this segment falls through to here for the rest of its life. ORB-
+                        # SLAM3's own InitializeIMU latches permanently closed after VIBA2
+                        # (mbIMU_BA2 = true) and never re-solves gravity/bias again; measured
+                        # directly that this matters on a long recording - the segment's implied
+                        # tilt kept growing unconstrained for the rest of the run once frozen
+                        # (VIBA2's own one-shot solve has no way to correct for further drift a
+                        # only-later window would reveal). Continuing here with the SAME ratchet-
+                        # gated, sliding-window path the non-orbslam3-style default already used
+                        # lets a later, better-conditioned window still supersede VIBA2's answer
+                        # (Pareto frontier - see _solve_and_realign's docstring) instead of
+                        # freezing forever, while the ratchet itself still protects against a
+                        # later, noisier window undoing a good VIBA2 result.
                         window_kf_ids = (
                             segment_kf_ids if os.environ.get("CUMULATIVE_REINIT_WINDOW")
                             else segment_kf_ids[-reinit_window_kf:]
@@ -940,6 +953,19 @@ def main():
                             print(f"  IMU reinit check @ {n_keyframes}kf: no surviving IMU-factor chain, skipped")
                     elif viba_stage is not None:
                         just_reinitialized = True
+                        # Seeds the ratchet floor (see the final `else` branch above) with
+                        # kf20-refine/VIBA1/VIBA2's own result, so once this chain hands off to
+                        # the ratchet-gated path after VIBA2, a later window has to beat THIS
+                        # result (on magnitude or diversity) rather than starting with no memory
+                        # of it at all and accepting the first thing under the raw tolerance.
+                        reinit_best_gravity_error = (
+                            diag["gravity_error"] if reinit_best_gravity_error is None
+                            else min(reinit_best_gravity_error, diag["gravity_error"])
+                        )
+                        reinit_best_axis_diversity = (
+                            diag["rotation_axis_diversity"] if reinit_best_axis_diversity is None
+                            else max(reinit_best_axis_diversity, diag["rotation_axis_diversity"])
+                        )
                         last_reinit_accept_kf = n_keyframes
                         last_accepted_bias[mapper._current_segment_id] = np.concatenate(
                             [diag["accel_bias"], diag["gyro_bias"]]

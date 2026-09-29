@@ -86,6 +86,25 @@ def rotation_aligning(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.eye(3) + vx + vx @ vx * ((1 - c) / (s ** 2))
 
 
+def heading_fix_rotation(forward_xy: np.ndarray) -> np.ndarray:
+    """Returns R (3x3, a pure rotation about world +Z) such that R @ v rotates a world
+    vector whose horizontal (XY) component is `forward_xy` to point along world +X,
+    leaving the Z component untouched - used to cancel the arbitrary residual yaw that
+    rotation_aligning's minimal-rotation construction leaves undetermined (gravity
+    alignment only constrains 2 of 3 rotational DOF; nothing here has a compass to fix
+    the third). Returns identity if forward_xy is ~zero (forward is ~vertical, no
+    meaningful heading to fix)."""
+    norm = float(np.linalg.norm(forward_xy))
+    if norm < 1e-6:
+        return np.eye(3)
+    cos_a, sin_a = forward_xy[0] / norm, forward_xy[1] / norm
+    return np.array([
+        [cos_a, sin_a, 0.0],
+        [-sin_a, cos_a, 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+
+
 def gravity_alignment_rotation(accel_samples: np.ndarray, accel_bias: np.ndarray | None = None) -> np.ndarray:
     """Returns R_world_body (3x3): rotates a body-frame vector into a world frame whose +Z
     axis points opposite gravity, estimated from a (near-)static window's average

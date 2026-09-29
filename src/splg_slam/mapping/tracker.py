@@ -22,6 +22,7 @@ from splg_slam.mapping.imu_init import choose_imu_init_mode
 from splg_slam.mapping.imu_preintegration import (
     bias_from_vector,
     gravity_alignment_rotation,
+    heading_fix_rotation,
     make_preintegration_params,
     preintegrate,
 )
@@ -597,6 +598,16 @@ class OfflineMapper:
                     )
                     r_cam0_body = self.imu_calib.T_cam0_body[:3, :3]
                     pose_cw0[:3, :3] = r_cam0_body @ r_world_body0.T
+                    # gravity_alignment_rotation only constrains "up" (2 of 3 rotational
+                    # DOF) - the residual yaw is an arbitrary side effect of this window's
+                    # own raw accelerometer reading, unrelated to which way the camera is
+                    # actually facing. Pin it to the same "camera-forward = world +X"
+                    # convention the no-IMU bootstrap above already uses, so both modes'
+                    # world frames are comparable instead of differing by an arbitrary
+                    # rotation (confirmed directly: two otherwise-identical recordings
+                    # landed ~91deg apart in heading purely from this).
+                    forward0 = pose_cw0[:3, :3].T @ np.array([0.0, 0.0, 1.0])
+                    pose_cw0[:3, :3] = pose_cw0[:3, :3] @ heading_fix_rotation(forward0[:2]).T
                 elif not self.imu_tight_fusion:
                     print("  warning: tight_fusion=False and the leading IMU window isn't "
                           "static - can't gravity-align without either; proceeding with an "
@@ -943,6 +954,11 @@ class OfflineMapper:
             )
             r_cam0_body = self.imu_calib.T_cam0_body[:3, :3]
             pose[:3, :3] = r_cam0_body @ r_world_body0.T
+            # Same arbitrary-yaw fix as the whole run's own bootstrap above (see its
+            # comment) - this is a FRESH independent origin (this method's own docstring),
+            # so it needs its own heading pin too, not just the first segment's.
+            forward0 = pose[:3, :3].T @ np.array([0.0, 0.0, 1.0])
+            pose[:3, :3] = pose[:3, :3] @ heading_fix_rotation(forward0[:2]).T
         else:
             print("  [atlas] new segment's leading IMU window isn't static - can't "
                   "gravity-align this segment's origin, proceeding with an arbitrary orientation")

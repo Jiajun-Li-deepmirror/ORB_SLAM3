@@ -6,7 +6,12 @@ from splg_slam.data.euroc import ImuCalibration
 from splg_slam.geometry.pose_utils import rotation_angle_deg
 from splg_slam.map.world_map import WorldMap
 from splg_slam.mapping.gtsam_utils import pose_cw_to_body_gtsam
-from splg_slam.mapping.imu_preintegration import find_static_window, preintegrate, rotation_aligning
+from splg_slam.mapping.imu_preintegration import (
+    find_static_window,
+    heading_fix_rotation,
+    preintegrate,
+    rotation_aligning,
+)
 
 
 def choose_imu_init_mode(
@@ -411,6 +416,21 @@ def _solve_and_realign(
     # gravity-magnitude agreement alone can't be trusted to mean the DIRECTION is correct too.
     up_dir = -gravity / max(gravity_mag, 1e-6)
     r_align = rotation_aligning(up_dir, np.array([0.0, 0.0, 1.0]))
+
+    # rotation_aligning's minimal-rotation construction only constrains 2 of 3 rotational
+    # DOF (which way is "up") - the residual yaw is an arbitrary side effect of whatever
+    # raw orientation this segment's reference keyframe happened to start with, and a FRESH
+    # arbitrary yaw gets introduced on every call site's own minimal rotation (bootstrap,
+    # kf20-refine, VIBA1, VIBA2, periodic reinit) independently, with nothing tying them
+    # together - confirmed directly: two visually-identical straight-line recordings ended
+    # up ~91 degrees apart in world heading purely from this. Pin the segment's own
+    # reference keyframe's camera-forward direction to world +X (the same convention the
+    # no-IMU bootstrap already uses in tracker.py) by composing an extra world-Z-axis
+    # rotation on top - this only touches heading, never the vertical alignment r_align
+    # just established (a Z-axis rotation composed on the left leaves world Z fixed).
+    forward_before = world_map.keyframes[kf_ids_ordered[0]].pose_cw[:3, :3].T @ np.array([0.0, 0.0, 1.0])
+    forward_mid = r_align @ forward_before
+    r_align = heading_fix_rotation(forward_mid[:2]) @ r_align
     r_align_angle_deg = rotation_angle_deg(r_align)
 
     accepted = True

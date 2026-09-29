@@ -8,6 +8,7 @@ static). The XZ side view makes exactly that tilt directly visible, not just inf
 from the printed numbers.
 """
 import argparse
+import itertools
 import sys
 from pathlib import Path
 
@@ -109,7 +110,8 @@ def main():
     # keyframe itself (relocalization only re-anchors ref_keyframe, see
     # OfflineMapper._on_tracking_failure), so it's plotted from world_map.relocalization_events
     # rather than off keyframe_ids_sorted().
-    for spec, line_color in zip(args.map, ["0.55", "0.35", "0.7", "0.2"]):
+    line_colors = itertools.cycle(["0.55", "0.35", "0.7", "0.2", "0.05", "0.85"])
+    for spec, line_color in zip(args.map, line_colors):
         label, _, map_path = spec.partition("=")
         world_map = load_map(map_path)
         kf_ids = world_map.keyframe_ids_sorted()
