@@ -30,6 +30,65 @@ GYRO_TOPIC = "/camera/camera/gyro/sample"
 ACCEL_TOPIC = "/camera/camera/accel/sample"
 DEPTH_TOPIC = "/camera/camera/depth/image_rect_raw"
 
+# Multi-pose accelerometer calibration (Tedaldi et al. 2014 style: many - here 17 -
+# arbitrary, non-axis-aligned static holds, each just needs |corrected accel| == true
+# gravity, no need to align to or even know a target direction) measured 2026-09-29 from a
+# dedicated ~104s recording. Fit as a full lower-triangular scale/misalignment matrix +
+# bias (corrected = M @ (raw - bias)), leave-one-out cross-validated RMS residual 0.088% of
+# g on that SAME calibration recording - vs. 1.39% for this device's onboard
+# rs-imu-calibration.py-written calibration, or 1.17% for a diagonal-only fit of this same
+# 17-pose data, so the full matrix's cross-axis terms looked genuinely well-constrained
+# in-session.
+#
+# DIAGONAL-ONLY BELOW ANYWAY (cross-axis terms measured, then deliberately discarded):
+# applying the FULL fitted matrix to 4 real, separately-recorded SLAM datasets (stereo+IMU
+# Z-drift vs. a PCA-corrected pure-stereo baseline) made 3 of 4 WORSE than using only this
+# same fit's scale+bias (one by >2x) - the exact same failure mode this device's onboard
+# calibration's cross-axis terms already showed (see git history). In-session leave-one-out
+# validation apparently doesn't guarantee a cross-axis fit generalizes to a DIFFERENT
+# recording session - plausibly because these small, second-order terms genuinely drift
+# with time/temperature/mounting stress in a way bias+scale don't, so no single static
+# calibration session - however many poses - captures them reliably for later use. Diagonal
+# (scale) + bias only: still a measured, real improvement (this device's own raw accel read
+# |g|=9.717 vs. true 9.810, 0.9% low; this correction alone brings it within ~0.1-0.2%
+# depending on recording) without the cross-axis instability.
+#
+# Assumes every rosbag2 recording read through this module comes from the same physical
+# camera unit as the one calibrated here (see IMU_GYRO_NOISE_DENSITY's own comment on this
+# same assumption) - re-measure via a fresh multi-pose recording (hold still at many
+# varied, arbitrary tilts for a few seconds each - no need to align to anything) fed
+# through the same fit if a different physical D4xx unit is ever used.
+IMU_ACCEL_INTRINSIC_MATRIX = np.array([
+    [0.99953866, 0.0, 0.0],
+    [0.0, 1.00098365, 0.0],
+    [0.0, 0.0, 0.99998069],
+])
+IMU_ACCEL_INTRINSIC_BIAS = np.array([-0.02807345, 0.10911192, 0.01159382])
+# Averaged over the same 17 static poses used for IMU_ACCEL_INTRINSIC_MATRIX above (a
+# gyroscope reads the same true angular rate regardless of orientation, so any static
+# window - not just axis-aligned ones - gives a clean bias estimate; no scale/misalignment
+# fit attempted here, same as rs-imu-calibration.py's own gyro handling).
+IMU_GYRO_BIAS_MULTIPOSE = np.array([-1.56323701e-03, -1.39197873e-03, -1.80190388e-05])
+
+
+def apply_imu_intrinsics(values: np.ndarray) -> None:
+    """In-place: applies IMU_ACCEL_INTRINSIC_MATRIX/_BIAS and IMU_GYRO_BIAS_MULTIPOSE to
+    `values`' gyro (cols 0:3) and accel (cols 3:6) columns, same convention as
+    read_imu_samples/read_imu_combined_samples/read_imu_split_samples's Nx6
+    [wx,wy,wz,ax,ay,az] layout.
+
+    Confirmed empirically NOT a no-op on real recordings from this rig - a genuinely
+    static window's raw accel read |g|=9.717 (vs. true 9.810, 0.9% low); this correction
+    brings it within 0.09% (see IMU_ACCEL_INTRINSIC_MATRIX's own comment for the full
+    cross-validated accuracy check). The RealSense driver has its own optional runtime
+    motion-correction stage (motion-transform.cpp, gated behind an `enable_motion_correction`
+    option) that would make any accel correction here a harmless no-op if it had already
+    been applied before publishing - measurably NOT the case for the recordings this was
+    checked against, so this is real signal being left unused, not just defensive
+    redundancy."""
+    values[:, 0:3] -= IMU_GYRO_BIAS_MULTIPOSE
+    values[:, 3:6] = (IMU_ACCEL_INTRINSIC_MATRIX @ (values[:, 3:6] - IMU_ACCEL_INTRINSIC_BIAS).T).T
+
 # Measured via Allan variance on a real, dedicated static calibration recording (2026-09-23,
 # rosbag2_2026_09_23-07_06_50, ~14.3h stationary at these same GYRO_TOPIC/ACCEL_TOPIC topics,
 # 199.5Hz gyro / 100.6Hz accel) - RMS across x/y/z of the standard -1/2-slope (white noise,
@@ -201,6 +260,7 @@ def read_imu_combined_samples(reader) -> tuple[str, np.ndarray, np.ndarray]:
     rows.sort(key=lambda r: r[0])
     ts = np.array([r[0] for r in rows], dtype=np.int64)
     values = np.array([r[1:] for r in rows], dtype=np.float64)
+    apply_imu_intrinsics(values)
     return msg0.header.frame_id, ts, values
 
 
@@ -247,12 +307,15 @@ def read_imu_split_samples(reader) -> tuple[str, np.ndarray, np.ndarray]:
     keep = ~bad
     ts = gyro_ts[keep]
     values = np.concatenate([gyro_vals[keep], accel_vals[j[keep]]], axis=1)
+    apply_imu_intrinsics(values)
     return gyro_msg0.header.frame_id, ts, values
 
 
 def read_imu_samples(reader) -> tuple[str, np.ndarray, np.ndarray]:
     """Auto-detects combined vs. split IMU topics and returns (frame_id, timestamps_ns,
-    values)."""
+    values) - each of read_imu_combined_samples/read_imu_split_samples already applies this
+    device's own measured gyro/accel calibration (see apply_imu_intrinsics), so this
+    dispatcher doesn't need to itself."""
     if first_message(reader, IMU_COMBINED) is not None:
         return read_imu_combined_samples(reader)
     return read_imu_split_samples(reader)
