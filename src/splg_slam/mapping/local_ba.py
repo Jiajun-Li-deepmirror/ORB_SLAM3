@@ -39,6 +39,20 @@ def Y(j: int) -> int:
     return _Symbol("y", j).key()
 
 
+def _yaw_position_anchor_noise(anchor_pose, roll_pitch_sigma_rad: float, tight_sigma: float = 1e-6):
+    """Prior noise for a camera->world anchor pose that pins position and world-frame yaw
+    tightly but lets world roll/pitch move with `roll_pitch_sigma_rad`. PriorFactorPose3's
+    error lives in the anchor's own (camera) tangent frame, [rot, trans] order, and a world-
+    frame rotation perturbation w maps to camera-frame R^T w - so the desired world-frame
+    covariance is rotated into that frame rather than applied as a plain diagonal."""
+    r_wc = anchor_pose.rotation().matrix()
+    rot_cov_world = np.diag([roll_pitch_sigma_rad ** 2, roll_pitch_sigma_rad ** 2, tight_sigma ** 2])
+    cov = np.zeros((6, 6))
+    cov[:3, :3] = r_wc.T @ rot_cov_world @ r_wc
+    cov[3:, 3:] = np.eye(3) * tight_sigma ** 2
+    return gtsam.noiseModel.Gaussian.Covariance(cov)
+
+
 def local_bundle_adjustment(
     world_map: WorldMap,
     keyframe_ids: list[int],
@@ -58,6 +72,10 @@ def local_bundle_adjustment(
     imu_params=None,
     lm_max_iterations: int | None = None,
     lm_relative_error_tol: float | None = None,
+    anchor_roll_pitch_sigma_deg: float | None = None,
+    anchor_velocity_sigma: float | None = None,
+    accel_bias_prior_sigma: float | None = None,
+    gyro_bias_prior_sigma: float = 0.01,
 ) -> dict:
     """Refines poses of `keyframe_ids` ("free") and positions of the map points they
     observe via GTSAM Levenberg-Marquardt. Updates world_map in place. Points seen by a
@@ -217,14 +235,22 @@ def local_bundle_adjustment(
             "num_outliers_removed": 0, "initial_error": 0.0, "final_error": 0.0, "rejected": False,
         }
 
+    use_imu_factors = bool(imu_factors) and imu_params is not None and imu_calib is not None
     if not fixed_touched:
         # No frozen boundary geometry to anchor the gauge with - fall back to pinning the
         # oldest free keyframe (e.g. the very first local window of the whole sequence).
         anchor_kf_id = min(free_touched)
-        graph.add(PriorFactorPose3(X(anchor_kf_id), initial.atPose3(X(anchor_kf_id)), fixed_prior_noise))
+        anchor_pose = initial.atPose3(X(anchor_kf_id))
+        anchor_noise = fixed_prior_noise
+        if use_imu_factors and anchor_roll_pitch_sigma_deg is not None:
+            # With IMU factors (world gravity fixed at -Z), roll/pitch are observable, not a
+            # gauge freedom - VIO's true gauge is position + yaw only. Pinning all 6 DoF here
+            # froze whatever tilt the IMU init baked in: no BA could ever rotate it back.
+            anchor_noise = _yaw_position_anchor_noise(anchor_pose, np.radians(anchor_roll_pitch_sigma_deg))
+        graph.add(PriorFactorPose3(X(anchor_kf_id), anchor_pose, anchor_noise))
 
     imu_touched: set[int] = set()
-    if imu_factors and imu_params is not None and imu_calib is not None:
+    if use_imu_factors:
         tight_vel_noise = gtsam.noiseModel.Isotropic.Sigma(3, 1e-6)
         tight_bias_noise = gtsam.noiseModel.Diagonal.Sigmas(np.full(6, 1e-6))
         extrinsic_pose = matrix_to_gtsam_pose3(imu_calib.T_cam0_body)
@@ -238,6 +264,18 @@ def local_bundle_adjustment(
             initial.insert(V(kf_id), kf.velocity if kf.velocity is not None else np.zeros(3))
             initial.insert(B(kf_id), bias_from_vector(kf.imu_bias))
             graph.add(BetweenFactorPose3(X(kf_id), Y(kf_id), extrinsic_pose, fixed_prior_noise))
+            if accel_bias_prior_sigma is not None:
+                # Raw samples are already scale+bias corrected at load time (rosbag_common), so
+                # the residual bias should sit near zero. Without this, BA was measured pushing
+                # |ba| to 0.05-0.9 m/s^2 (1deg of tilt is ~0.17 m/s^2) - far beyond what the
+                # Allan-variance random walk allows over a whole recording - i.e. using bias as
+                # slack to absorb gravity-direction error instead of correcting it.
+                graph.add(PriorFactorConstantBias(
+                    B(kf_id), gtsam.imuBias.ConstantBias(np.zeros(3), np.zeros(3)),
+                    gtsam.noiseModel.Diagonal.Sigmas(np.array(
+                        [accel_bias_prior_sigma] * 3 + [gyro_bias_prior_sigma] * 3
+                    )),
+                ))
             if kf_id in fixed_touched:
                 graph.add(PriorFactorVector(V(kf_id), initial.atVector(V(kf_id)), tight_vel_noise))
                 graph.add(PriorFactorConstantBias(B(kf_id), initial.atConstantBias(B(kf_id)), tight_bias_noise))
@@ -258,10 +296,22 @@ def local_bundle_adjustment(
             # pin one state's initial estimate, unless a boundary keyframe already pinned one.
             anchor_imu_id = min(imu_touched)
             if anchor_imu_id not in fixed_touched:
-                graph.add(PriorFactorVector(V(anchor_imu_id), initial.atVector(V(anchor_imu_id)), tight_vel_noise))
-                graph.add(
-                    PriorFactorConstantBias(B(anchor_imu_id), initial.atConstantBias(B(anchor_imu_id)), tight_bias_noise)
+                # Velocity is observable with IMU + stereo, not a gauge freedom; a 1e-6 prior on
+                # a moving anchor's world-frame velocity would also block the roll/pitch freedom
+                # above (a 1deg tilt changes a 1.4m/s velocity by ~2.5cm/s).
+                vel_noise = (
+                    gtsam.noiseModel.Isotropic.Sigma(3, anchor_velocity_sigma)
+                    if anchor_velocity_sigma is not None else tight_vel_noise
                 )
+                graph.add(PriorFactorVector(V(anchor_imu_id), initial.atVector(V(anchor_imu_id)), vel_noise))
+                if accel_bias_prior_sigma is None:
+                    # Skipped when every keyframe already has a zero-centred bias prior: bias is
+                    # not a gauge freedom, and pinning it at 1e-6 here, chained through every
+                    # bias random-walk edge, froze the WHOLE map's bias at whatever the last
+                    # closed-form init/reinit wrote (measured: 0.2-0.86 m/s^2 locked in).
+                    graph.add(
+                        PriorFactorConstantBias(B(anchor_imu_id), initial.atConstantBias(B(anchor_imu_id)), tight_bias_noise)
+                    )
 
     lm_params = gtsam.LevenbergMarquardtParams()
     if lm_max_iterations is not None:

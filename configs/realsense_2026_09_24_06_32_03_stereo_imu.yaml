@@ -58,6 +58,8 @@ imu:
   reinit_window_kf: 100                # sliding keyframe window used for each periodic re-init solve
   reinit_gravity_tolerance: 0.08       # relative |g| error a re-init estimate must beat to be accepted
   reinit_max_rotation_deg: 5.0         # extra rotation-magnitude sanity check on top of the gravity check
+  time_offset_ms: 8.0                  # IMU timestamps run ~8ms ahead of the camera's (gyro vs. vision rotation matching)
+  gyro_scale: 1.01                     # this unit's gyro reads ~1% low (same matching)
 
 tracking:
   mode: stereo
@@ -107,6 +109,9 @@ mapping:
   point_min_observations: 2
   final_global_ba: true
   stereo_ba_enabled: true
+  ba_accel_bias_prior_sigma: 0.02          # zero-centred accel-bias prior: raw accel is already scale+bias corrected at load time
+  ba_anchor_roll_pitch_sigma_deg: 5.0      # BA anchor pins only position+yaw with IMU, so a tilted gravity init can be corrected
+  ba_anchor_velocity_sigma: 1.0            # m/s; a tight anchor velocity prior would also block that roll/pitch correction
   keyframe_culling_enabled: true
   keyframe_culling_every_n_kf: 5
   keyframe_culling_min_observers: 3

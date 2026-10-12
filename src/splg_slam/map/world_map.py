@@ -275,6 +275,22 @@ class WorldMap:
             self.covisibility[other_id].pop(kf_id, None)
         self.covisibility.pop(kf_id, None)
 
+        # Bridge the IMU chain across the removed keyframe: (a -> kf) + (kf -> b) becomes one
+        # (a -> b) factor over the concatenated raw samples. Simply dropping both left 9-29%
+        # of adjacent keyframe pairs in a finished map with no IMU constraint at all (measured
+        # on 4 RealSense recordings), splitting what final global BA sees into disconnected
+        # pieces.
+        incoming = [f for f in self.imu_factors if f[1] == kf_id]
+        outgoing = [f for f in self.imu_factors if f[0] == kf_id]
+        if incoming or outgoing:
+            self.imu_factors = [f for f in self.imu_factors if kf_id not in (f[0], f[1])]
+            if len(incoming) == 1 and len(outgoing) == 1:
+                a, _, samples_in = incoming[0]
+                _, b, samples_out = outgoing[0]
+                kf_a, kf_b = self.keyframes.get(a), self.keyframes.get(b)
+                if kf_a is not None and kf_b is not None and kf_a.segment_id == kf_b.segment_id:
+                    self.imu_factors.append((a, b, np.concatenate([samples_in, samples_out], axis=0)))
+
     def find_redundant_keyframes(
         self, candidate_kf_ids: list[int], min_observers: int = 3, redundancy_ratio: float = 0.9
     ) -> list[int]:

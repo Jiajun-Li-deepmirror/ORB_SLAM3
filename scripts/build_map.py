@@ -383,6 +383,20 @@ def main():
                 setattr(imu_calib, _field, float(_val))
                 print(f"  IMU calib: {_field} overridden by config (imu.{_cfg_name}) = {_val}")
     imu_measurements = dmod.load_imu_measurements(ddir) if imu_enabled and hasattr(dmod, "load_imu_measurements") else None
+    if imu_measurements is not None:
+        # imu.time_offset_ms: how far the IMU's timestamps run AHEAD of the camera's for the
+        # same physical instant - subtracted from every IMU timestamp. imu.gyro_scale: factor
+        # applied to raw gyro. Both measured on this D435i by matching gyro-integrated vs.
+        # vision relative rotations across 4 recordings: best offset +8..+10ms (median rotation
+        # residual 0.20-0.26deg -> 0.06-0.07deg), gyro reading ~1% low (scale 1.007-1.014).
+        time_offset_ms = getattr(cfg.imu, "time_offset_ms", None)
+        if time_offset_ms:
+            imu_measurements[:, 0] -= time_offset_ms * 1e6
+            print(f"  IMU calib: IMU timestamps shifted by -{time_offset_ms}ms (imu.time_offset_ms)")
+        gyro_scale = getattr(cfg.imu, "gyro_scale", None)
+        if gyro_scale and gyro_scale != 1.0:
+            imu_measurements[:, 1:4] *= gyro_scale
+            print(f"  IMU calib: gyro readings scaled by {gyro_scale} (imu.gyro_scale)")
     accel_scale_correction = getattr(cfg.imu, "accel_scale_correction", None) if imu_enabled else None
     if imu_measurements is not None and accel_scale_correction is None:
         # Auto-detect instead of requiring a hand-measured per-device constant in every
@@ -589,16 +603,16 @@ def main():
 
     entries = dmod.load_mono_frames(ddir) if mono_mode else dmod.load_stereo_frames(ddir)
     stride = cfg.dataset.frame_stride or 1
-    # skip_frames: drops this many leading frames (BEFORE stride/max_frames apply) - for
-    # discarding a bad start-of-recording artifact (e.g. the operator still panning the
-    # camera into position when recording started - confirmed directly on a real dataset:
-    # frame 0 and frame 15 showed two completely different, unrelated scenes ~90+ degrees
-    # apart) that would otherwise become kf0 and immediately break tracking for everything
-    # after it. Image-side only: imu.init_static_samples's own leading-static-window search
-    # (choose_imu_init_mode) still reads from the raw IMU stream's true start, not from
-    # this skip point - fine for pure-stereo (no-IMU) use, but means IMU-mode init may still
-    # search over the discarded/bad interval - not addressed here.
-    skip_frames = getattr(cfg.dataset, "skip_frames", 0) or 0
+    # skip_frames: drops this many leading frames (BEFORE stride/max_frames apply). Unset
+    # defaults to 1 for rosbag2: the RealSense driver's first recorded frame is a stale image
+    # left over from before recording started (a completely different scene - confirmed on
+    # every recording checked), which becomes kf0, breaks tracking on frame 1, and leaves the
+    # rest of the run stitched on by the zero-velocity fallback. An explicit value (including
+    # 0) always wins. Image-side only: imu.init_static_samples's own leading-static-window
+    # search (choose_imu_init_mode) still reads from the raw IMU stream's true start.
+    skip_frames = getattr(cfg.dataset, "skip_frames", None)
+    if skip_frames is None:
+        skip_frames = 1 if getattr(cfg.dataset, "kind", "euroc") == "rosbag2" else 0
     if isinstance(entries, list):
         # euroc/kitti: a concrete, already-decoded-path list - slicing gives an exact count.
         entries = entries[skip_frames:][::stride]
@@ -1041,6 +1055,9 @@ def main():
                             mapper.world_map, window, rectifier.K_rect, baseline=stereo_ba_baseline,
                             imu_factors=mapper.world_map.imu_factors if use_imu else None,
                             imu_calib=imu_calib if use_imu else None, imu_params=imu_params if use_imu else None,
+                            anchor_roll_pitch_sigma_deg=getattr(cfg.mapping, "ba_anchor_roll_pitch_sigma_deg", None),
+                            anchor_velocity_sigma=getattr(cfg.mapping, "ba_anchor_velocity_sigma", None),
+                            accel_bias_prior_sigma=getattr(cfg.mapping, "ba_accel_bias_prior_sigma", None),
                             # This same window gets re-optimized again in local_ba_every_n_kf
                             # keyframes and fully re-converged once more by the final global BA -
                             # a periodic pass doesn't need GTSAM's default tight convergence every
@@ -1528,6 +1545,9 @@ def main():
             loop_edges=mapper.world_map.loop_edges, loop_min_inliers=loop_cfg.min_inliers if loop_enabled else 60,
             imu_factors=mapper.world_map.imu_factors if use_imu else None,
             imu_calib=imu_calib if use_imu else None, imu_params=imu_params if use_imu else None,
+            anchor_roll_pitch_sigma_deg=getattr(cfg.mapping, "ba_anchor_roll_pitch_sigma_deg", None),
+            anchor_velocity_sigma=getattr(cfg.mapping, "ba_anchor_velocity_sigma", None),
+            accel_bias_prior_sigma=getattr(cfg.mapping, "ba_accel_bias_prior_sigma", None),
         )
         print(
             f"Final global BA ({len(all_kf_ids)} keyframes, {stats['num_points']} points, "
