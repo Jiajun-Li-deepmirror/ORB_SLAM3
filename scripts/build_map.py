@@ -1055,8 +1055,8 @@ def main():
                             mapper.world_map, window, rectifier.K_rect, baseline=stereo_ba_baseline,
                             imu_factors=mapper.world_map.imu_factors if use_imu else None,
                             imu_calib=imu_calib if use_imu else None, imu_params=imu_params if use_imu else None,
-                            anchor_roll_pitch_sigma_deg=getattr(cfg.mapping, "ba_anchor_roll_pitch_sigma_deg", None),
-                            anchor_velocity_sigma=getattr(cfg.mapping, "ba_anchor_velocity_sigma", None),
+                            anchor_roll_pitch_sigma_deg=getattr(cfg.mapping, "ba_anchor_roll_pitch_sigma_deg", 5.0),
+                            anchor_velocity_sigma=getattr(cfg.mapping, "ba_anchor_velocity_sigma", 1.0),
                             accel_bias_prior_sigma=getattr(cfg.mapping, "ba_accel_bias_prior_sigma", None),
                             # This same window gets re-optimized again in local_ba_every_n_kf
                             # keyframes and fully re-converged once more by the final global BA -
@@ -1545,8 +1545,8 @@ def main():
             loop_edges=mapper.world_map.loop_edges, loop_min_inliers=loop_cfg.min_inliers if loop_enabled else 60,
             imu_factors=mapper.world_map.imu_factors if use_imu else None,
             imu_calib=imu_calib if use_imu else None, imu_params=imu_params if use_imu else None,
-            anchor_roll_pitch_sigma_deg=getattr(cfg.mapping, "ba_anchor_roll_pitch_sigma_deg", None),
-            anchor_velocity_sigma=getattr(cfg.mapping, "ba_anchor_velocity_sigma", None),
+            anchor_roll_pitch_sigma_deg=getattr(cfg.mapping, "ba_anchor_roll_pitch_sigma_deg", 5.0),
+            anchor_velocity_sigma=getattr(cfg.mapping, "ba_anchor_velocity_sigma", 1.0),
             accel_bias_prior_sigma=getattr(cfg.mapping, "ba_accel_bias_prior_sigma", None),
         )
         print(

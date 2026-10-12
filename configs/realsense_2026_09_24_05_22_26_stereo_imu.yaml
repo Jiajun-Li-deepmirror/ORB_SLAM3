@@ -110,8 +110,6 @@ mapping:
   final_global_ba: true
   stereo_ba_enabled: true
   ba_accel_bias_prior_sigma: 0.02          # zero-centred accel-bias prior: raw accel is already scale+bias corrected at load time
-  ba_anchor_roll_pitch_sigma_deg: 5.0      # BA anchor pins only position+yaw with IMU, so a tilted gravity init can be corrected
-  ba_anchor_velocity_sigma: 1.0            # m/s; a tight anchor velocity prior would also block that roll/pitch correction
   keyframe_culling_enabled: true
   keyframe_culling_every_n_kf: 5
   keyframe_culling_min_observers: 3
