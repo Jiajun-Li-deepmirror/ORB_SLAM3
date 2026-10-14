@@ -44,6 +44,44 @@ from splg_slam.mapping.tracker import OfflineMapper
 from splg_slam.utils import set_global_seed
 
 
+def optimize_loop_update(
+    world_map, candidate_id, target_id, relative, num_inliers,
+    transform_ids=None, transform=None, **kwargs,
+):
+    """Commit a loop only when pose-graph optimization accepts the proposal.
+
+    Point fusion happens in the caller after acceptance. An experimental rigid
+    excursion also needs its preliminary pose/velocity/point transform rolled back.
+    """
+    state = None
+    if transform_ids is not None:
+        state = (
+            {i: (kf.pose_cw, kf.velocity) for i, kf in world_map.keyframes.items()},
+            {i: mp.position for i, mp in world_map.map_points.items()},
+        )
+        world_map.transform_keyframes(transform_ids, transform)
+    old_edge_count = len(world_map.loop_edges)
+    world_map.add_loop_edge(candidate_id, target_id, relative, num_inliers)
+
+    def rollback():
+        del world_map.loop_edges[old_edge_count:]
+        if state is not None:
+            for i, (pose, velocity) in state[0].items():
+                world_map.keyframes[i].pose_cw = pose
+                world_map.keyframes[i].velocity = velocity
+            for i, position in state[1].items():
+                world_map.map_points[i].position = position
+
+    try:
+        stats = optimize_pose_graph(world_map, **kwargs)
+    except Exception:
+        rollback()
+        raise
+    if stats["rejected"]:
+        rollback()
+    return stats
+
+
 def try_close_loops(
     mapper, rectifier, retrieval_index, loop_cfg, loop_feats_cache, loop_consistency,
     target_frame_id: int, require_confirmation: bool = True, verbose_rejections: bool = False,
@@ -114,11 +152,11 @@ def try_close_loops(
                 # things depending on which check tripped (see its docstring): the raw
                 # 2D-3D correspondence count (rejected before PnP even ran), 0 (PnP itself
                 # failed to converge), or a genuine post-RANSAC inlier count (ran fine, just
-                # under min_inliers/min_inlier_ratio) - report the raw LightGlue match
-                # count too so it's clear which case this was.
+                # under min_inliers/min_inlier_ratio). Only verified inlier matches are
+                # returned for fusion; pre-PnP failures have an empty match list.
                 print(
                     f"    candidate kf{target_frame_id} <-> kf{cand_id} (sim={sim:.3f}) failed "
-                    f"geometric verification: {len(loop_matches)} LightGlue match(es), "
+                    f"geometric verification: {len(loop_matches)} PnP-inlier match(es), "
                     f"n_inliers={n_inliers} (need >={loop_cfg.min_inliers} 2D-3D "
                     f"correspondences with a map point to even attempt PnP, then that many "
                     f"post-RANSAC inliers with ratio >={getattr(loop_cfg, 'min_inlier_ratio', 0.0)} "
@@ -230,43 +268,17 @@ def try_close_loops(
             )
             return 1
 
+        excursion_ids = None
+        correction = None
         if rigid_excursion:
-            # EXPERIMENTAL: same idea as the cross-segment merge above, but there's no
-            # segment_id boundary to key off since tracking never actually broke - the
-            # excursion is just "every keyframe since we last stood here" (cand_id itself
-            # excluded and left untouched as the fixed anchor). NOTE this doesn't try to
-            # detect a keyframe in that range that's *also* already fused with map
-            # keyframes before cand_id via some earlier, independent closure (would exist
-            # if the trajectory backtracked more intricately than a simple there-and-back)
-            # - fine for this experiment's out-and-back excursion shape, not a general
-            # solution.
-            kf_ids_sorted = mapper.world_map.keyframe_ids_sorted()
-            excursion_ids = {k for k in kf_ids_sorted if cand_id < k <= target_frame_id}
-            t_correction = np.linalg.inv(pose_cw_loop) @ mapper.world_map.keyframes[target_frame_id].pose_cw
-            mapper.world_map.transform_keyframes(excursion_ids, t_correction)
-            n_fused = 0
-            if getattr(loop_cfg, "fusion_enabled", True):
-                n_fused = fuse_loop_matches(mapper.world_map, cand_id, target_frame_id, loop_matches)
-            mapper.world_map.add_loop_edge(cand_id, target_frame_id, rel, n_inliers)
-            pg_stats = optimize_pose_graph(mapper.world_map, loop_min_inliers=loop_cfg.min_inliers)
-            if mapper.reloc_index is not None:
-                mapper.reloc_index.build(mapper.world_map)
-            mapper.world_map.add_segment_merge(target_frame_id, cand_id)
-            print(
-                f"  rigid excursion weld: kf{target_frame_id} <-> kf{cand_id} "
-                f"(arc {arc_length_m:.0f}m, {len(excursion_ids)} kf transformed, sim={sim:.3f}, "
-                f"inliers={n_inliers}, fused={n_fused} points) -> pose graph polish "
-                f"{pg_stats['initial_error']:.1f} -> {pg_stats['final_error']:.1f}"
-            )
-            return 1
-
-        n_fused = 0
-        if getattr(loop_cfg, "fusion_enabled", True):
-            n_fused = fuse_loop_matches(mapper.world_map, cand_id, target_frame_id, loop_matches)
-
-        mapper.world_map.add_loop_edge(cand_id, target_frame_id, rel, n_inliers)
-        pg_stats = optimize_pose_graph(
-            mapper.world_map, loop_min_inliers=loop_cfg.min_inliers,
+            excursion_ids = {
+                k for k in mapper.world_map.keyframe_ids_sorted() if cand_id < k <= target_frame_id
+            }
+            correction = np.linalg.inv(pose_cw_loop) @ mapper.world_map.keyframes[target_frame_id].pose_cw
+        pg_stats = optimize_loop_update(
+            mapper.world_map, cand_id, target_frame_id, rel, n_inliers,
+            transform_ids=excursion_ids, transform=correction,
+            loop_min_inliers=loop_cfg.min_inliers,
             odom_arc_scaling_enabled=getattr(mapper.cfg.mapping, "odom_arc_scaling_enabled", False),
             odom_arc_reference_m=getattr(mapper.cfg.mapping, "odom_arc_reference_m", 20.0),
             odom_imu_only_penalty_m=getattr(mapper.cfg.mapping, "odom_imu_only_penalty_m", 0.0),
@@ -274,12 +286,17 @@ def try_close_loops(
         if pg_stats["rejected"]:
             print(
                 f"  loop candidate kf{target_frame_id} <-> kf{cand_id} confirmed but pose-graph "
-                f"update REJECTED (would move a keyframe {pg_stats['max_pose_shift_m']:.1f}m - "
-                f"likely a degenerate solve elsewhere in the graph)"
+                f"update REJECTED (would move a keyframe {pg_stats['max_pose_shift_m']:.1f}m)"
             )
             continue
+        n_fused = 0
+        if getattr(loop_cfg, "fusion_enabled", True):
+            n_fused = fuse_loop_matches(mapper.world_map, cand_id, target_frame_id, loop_matches)
+        if rigid_excursion:
+            mapper.world_map.add_segment_merge(target_frame_id, cand_id)
         print(
-            f"  loop closure: kf{target_frame_id} <-> kf{cand_id} "
+            f"  {'rigid excursion weld' if rigid_excursion else 'loop closure'}: "
+            f"kf{target_frame_id} <-> kf{cand_id} "
             f"(sim={sim:.3f}, inliers={n_inliers}, fused={n_fused} points) -> pose graph optimized, "
             f"error {pg_stats['initial_error']:.1f} -> {pg_stats['final_error']:.1f}"
         )

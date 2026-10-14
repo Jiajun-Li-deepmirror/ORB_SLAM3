@@ -38,6 +38,8 @@ class LoopConsistencyTracker:
 
         for entry in self._pending:
             if abs(entry["candidate_kf"] - candidate_kf_id) <= self.group_radius_kf:
+                if current_kf_id <= entry["last_current_kf"]:
+                    return False
                 entry["count"] += 1
                 entry["last_current_kf"] = current_kf_id
                 entry["candidate_kf"] = candidate_kf_id
@@ -146,7 +148,7 @@ def verify_loop_candidate(
     """LightGlue-matches the candidate's stored features against the current keyframe's,
     gathers 2D-3D correspondences via the candidate's map points, and solves PnP+RANSAC.
     Returns (accepted, pose_cw_of_current_via_candidates_map, num_inliers, matches), where
-    `matches` are the raw LightGlue (candidate_kp_idx, current_kp_idx) pairs - callers can
+    `matches` are only the PnP-inlier (candidate_kp_idx, current_kp_idx) pairs - callers can
     pass these to fuse_loop_matches() once the loop is confirmed, to merge whatever map
     points the two sides had independently created for the same physical points.
 
@@ -162,27 +164,29 @@ def verify_loop_candidate(
     kpts_current, _ = SPLG.to_frame_arrays(current_feats)
 
     candidate_kf = world_map.keyframes[candidate_kf_id]
-    obj_pts, img_pts = [], []
+    obj_pts, img_pts, correspondence_matches = [], [], []
     for cand_i, cur_i in matches:
         mp_id = candidate_kf.map_point_ids[cand_i]
-        if mp_id >= 0:
+        if mp_id >= 0 and mp_id in world_map.map_points:
             obj_pts.append(world_map.map_points[mp_id].position)
             img_pts.append(kpts_current[cur_i])
+            correspondence_matches.append((cand_i, cur_i))
 
     if len(obj_pts) < min_inliers:
-        return False, None, len(obj_pts), matches
+        return False, None, len(obj_pts), np.empty((0, 2), dtype=np.int64)
 
     ok, pose_cw_loop, inlier_mask = solve_pnp_ransac(
         np.asarray(obj_pts), np.asarray(img_pts), rectifier.K_rect,
         reproj_threshold_px=pnp_reproj_threshold_px,
     )
     if not ok:
-        return False, None, 0, matches
+        return False, None, 0, np.empty((0, 2), dtype=np.int64)
 
     num_inliers = int(inlier_mask.sum())
     inlier_ratio = num_inliers / len(obj_pts)
     accepted = num_inliers >= min_inliers and inlier_ratio >= min_inlier_ratio
-    return accepted, pose_cw_loop, num_inliers, matches
+    inlier_matches = np.asarray(correspondence_matches, dtype=np.int64)[inlier_mask]
+    return accepted, pose_cw_loop, num_inliers, inlier_matches
 
 
 def fuse_loop_matches(world_map: WorldMap, candidate_kf_id: int, current_kf_id: int, matches: np.ndarray) -> int:
