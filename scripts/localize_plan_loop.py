@@ -45,7 +45,8 @@ def load_imu_for_localizer(cfg, dmod, ddir: Path):
     tf_kwargs = {"tf_static_from": cfg.dataset.tf_static_from} if getattr(cfg.dataset, "tf_static_from", None) else {}
     imu_calib = dmod.load_imu_calibration(ddir, **tf_kwargs)
     imu_measurements = dmod.load_imu_measurements(ddir)
-    imu_params = make_preintegration_params(imu_calib, cfg.imu.gravity_norm, cfg.imu.integration_sigma)
+    imu_params = make_preintegration_params(imu_calib, cfg.imu.gravity_norm, cfg.imu.integration_sigma,
+                                      bias_init_covariance=getattr(cfg.imu, "bias_init_covariance", None))
     return imu_calib, imu_params, imu_measurements
 
 

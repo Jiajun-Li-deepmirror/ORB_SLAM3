@@ -79,8 +79,8 @@ def local_bundle_adjustment(
 ) -> dict:
     """Refines poses of `keyframe_ids` ("free") and positions of the map points they
     observe via GTSAM Levenberg-Marquardt. Updates world_map in place. Points seen by a
-    single keyframe are left fixed (a single reprojection factor cannot constrain a 3D
-    point on its own).
+    single keyframe are excluded from the solve and follow that observer's pose
+    correction, preserving their measured camera-relative position/depth.
 
     Pass `baseline` (rectifier.baseline) to use a true stereo reprojection factor
     (GenericStereoFactor3D, constraining left AND right image pixels together) for any
@@ -336,8 +336,25 @@ def local_bundle_adjustment(
             "rejected": True, "max_pose_shift_m": max_shift,
         }
 
+    # Single-observer points are absent from the optimization. Keeping their old
+    # world coordinates after moving their camera makes otherwise valid features
+    # stale. Preserve their camera-frame position using the accepted correction.
+    corrections = {
+        kf_id: np.linalg.inv(pose_cw) @ world_map.keyframes[kf_id].pose_cw
+        for kf_id, pose_cw in new_poses.items()
+    }
+    for kf_id, correction in corrections.items():
+        for pid in world_map.keyframes[kf_id].map_point_ids:
+            if pid < 0 or int(pid) in valid_obs:
+                continue
+            mp = world_map.map_points[int(pid)]
+            if len(mp.observations) == 1 and kf_id in mp.observations:
+                mp.position = correction[:3, :3] @ mp.position + correction[:3, 3]
     for kf_id, pose_cw in new_poses.items():
-        world_map.keyframes[kf_id].pose_cw = pose_cw
+        kf = world_map.keyframes[kf_id]
+        if kf_id not in imu_touched and kf.velocity is not None:
+            kf.velocity = corrections[kf_id][:3, :3] @ kf.velocity
+        kf.pose_cw = pose_cw
     for pid in valid_obs:
         world_map.map_points[pid].position = np.array(result.atPoint3(L(pid)))
     # Mirror the pose write-back above: a fixed_touched keyframe's velocity/bias is

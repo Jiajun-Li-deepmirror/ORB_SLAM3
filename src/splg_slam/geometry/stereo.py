@@ -1,7 +1,9 @@
+from dataclasses import replace
+
 import cv2
 import numpy as np
 
-from splg_slam.data.euroc import StereoRig
+from splg_slam.data.euroc import ImuCalibration, StereoRig
 from splg_slam.geometry.camera import PinholeCamera, build_K
 
 
@@ -20,6 +22,8 @@ class StereoRectifier:
             k_l, d_l, k_r, d_r, size, r_rel, t_rel,
             flags=cv2.CALIB_ZERO_DISPARITY, alpha=0,
         )
+        self.T_rect_cam0 = np.eye(4)
+        self.T_rect_cam0[:3, :3] = r_l
 
         self.map_l = cv2.initUndistortRectifyMap(k_l, d_l, r_l, p_l, size, cv2.CV_32FC1)
         self.map_r = cv2.initUndistortRectifyMap(k_r, d_r, r_r, p_r, size, cv2.CV_32FC1)
@@ -63,6 +67,7 @@ class MonoRectifier:
     calls) needs zero changes to work with either rectifier."""
 
     def __init__(self, cam0: PinholeCamera):
+        self.T_rect_cam0 = np.eye(4)
         k, d = cam0.K, cam0.dist_coeffs
         size = (cam0.width, cam0.height)
         self.map_l = cv2.initUndistortRectifyMap(k, d, None, k, size, cv2.CV_32FC1)
@@ -78,6 +83,11 @@ class MonoRectifier:
     def rectify(self, img_left: np.ndarray, img_right: np.ndarray | None = None):
         rect = cv2.remap(img_left, *self.map_l, cv2.INTER_LINEAR)
         return rect, rect
+
+
+def rectify_imu_calibration(calibration: ImuCalibration, rectifier) -> ImuCalibration:
+    """Return IMU extrinsics in the image frame used by visual poses, without mutation."""
+    return replace(calibration, T_cam0_body=rectifier.T_rect_cam0 @ calibration.T_cam0_body)
 
 
 class StereoDepthEstimator:

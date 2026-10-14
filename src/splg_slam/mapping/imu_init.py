@@ -406,6 +406,11 @@ def _solve_and_realign(
     if solved is None:
         return None
     gravity, ba, velocities, scale = solved
+    # A failed numerical solve must not corrupt an otherwise usable map, including
+    # the first stereo bootstrap where no gravity-magnitude gate is configured.
+    estimates = [gravity, ba, bg, np.asarray(scale), *velocities.values()]
+    if not all(np.all(np.isfinite(value)) for value in estimates) or np.linalg.norm(gravity) < 1e-6:
+        return None
     axis_diversity = _rotation_axis_diversity(body_rotations, pairs)
 
     gravity_mag = float(np.linalg.norm(gravity))
@@ -428,7 +433,11 @@ def _solve_and_realign(
     # no-IMU bootstrap already uses in tracker.py) by composing an extra world-Z-axis
     # rotation on top - this only touches heading, never the vertical alignment r_align
     # just established (a Z-axis rotation composed on the left leaves world Z fixed).
-    forward_before = world_map.keyframes[kf_ids_ordered[0]].pose_cw[:3, :3].T @ np.array([0.0, 0.0, 1.0])
+    # Keep the heading reference attached to the segment, not to the moving
+    # start of the solve window. Otherwise a turn becomes a spurious yaw reset.
+    apply_ids = kf_ids_ordered if apply_kf_ids is None else apply_kf_ids
+    heading_id = min(apply_ids, key=lambda i: world_map.keyframes[i].timestamp_ns)
+    forward_before = world_map.keyframes[heading_id].pose_cw[:3, :3].T @ np.array([0.0, 0.0, 1.0])
     forward_mid = r_align @ forward_before
     r_align = heading_fix_rotation(forward_mid[:2]) @ r_align
     r_align_angle_deg = rotation_angle_deg(r_align)
@@ -504,6 +513,8 @@ def _solve_and_realign(
         kf.pose_cw = kf.pose_cw.copy()
         kf.pose_cw[:3, :3] = kf.pose_cw[:3, :3] @ r_align.T
         kf.pose_cw[:3, 3] = kf.pose_cw[:3, 3] * scale  # no-op when solve_scale=False (scale=1.0)
+        if kf.velocity is not None:
+            kf.velocity = r_align @ (kf.velocity * scale)
     for mp in world_map.map_points.values():
         observers = set(mp.observations.keys())
         if observers and observers <= solve_kf_ids:
@@ -512,8 +523,9 @@ def _solve_and_realign(
     bias_vec = np.concatenate([ba, bg])
     for idx, v in velocities.items():
         kf = world_map.keyframes[kf_ids_ordered[idx]]
+        # The solved velocity is already metric; do not apply scale a second time.
         kf.velocity = r_align @ v
-        kf.imu_bias = bias_vec
+        kf.imu_bias = bias_vec.copy()
 
     return diag
 
@@ -626,3 +638,71 @@ def run_periodic_imu_reinit(
         solve_scale=solve_scale, apply_kf_ids=apply_kf_ids, max_rotation_deg=max_rotation_deg,
         min_rotation_axis_diversity=min_rotation_axis_diversity,
     )
+
+
+def initialize_imu_with_refinement(
+    world_map, kf_ids_ordered, imu_calib, imu_params, gravity_norm, *,
+    k_rect, baseline=None, ba_kwargs=None, periodic=False, enabled=True, **init_kwargs,
+):
+    """Commit a gravity/bias seed only after a joint segment refinement succeeds.
+
+    The closed-form solve treats vision poses as fixed measurements. A joint BA
+    must reconcile that seed with the visual and inertial factors before tracking
+    resumes. Rejection restores the previous poses, points, velocities and biases.
+    """
+    from splg_slam.mapping.local_ba import local_bundle_adjustment
+
+    initialize = run_periodic_imu_reinit if periodic else run_dynamic_imu_init
+    if not enabled:
+        return initialize(world_map, kf_ids_ordered, imu_calib, imu_params, gravity_norm, **init_kwargs)
+    states = {
+        i: (kf.pose_cw.copy(), None if kf.velocity is None else kf.velocity.copy(),
+            None if kf.imu_bias is None else kf.imu_bias.copy())
+        for i, kf in world_map.keyframes.items()
+    }
+    from copy import deepcopy
+    points = {i: (mp, mp.position.copy(), mp.observations.copy()) for i, mp in world_map.map_points.items()}
+    associations = {i: kf.map_point_ids.copy() for i, kf in world_map.keyframes.items()}
+    covisibility = deepcopy(world_map.covisibility)
+    probation = world_map.point_probation.copy()
+
+    def restore():
+        for i, (pose, velocity, bias) in states.items():
+            kf = world_map.keyframes[i]
+            kf.pose_cw, kf.velocity, kf.imu_bias = pose, velocity, bias
+        world_map.map_points = {i: saved[0] for i, saved in points.items()}
+        for i, (mp, position, observations) in points.items():
+            mp.position, mp.observations = position, observations
+        for i, ids in associations.items():
+            world_map.keyframes[i].map_point_ids = ids
+        world_map.covisibility = covisibility
+        world_map.point_probation = probation
+
+    diag = initialize(world_map, kf_ids_ordered, imu_calib, imu_params, gravity_norm, **init_kwargs)
+    if diag is None or not diag["accepted"]:
+        return diag
+    apply_ids = init_kwargs.get("apply_kf_ids") or kf_ids_ordered
+    try:
+        stats = local_bundle_adjustment(
+            world_map, apply_ids, k_rect, baseline=baseline,
+            imu_factors=world_map.imu_factors, imu_calib=imu_calib, imu_params=imu_params,
+            **(ba_kwargs or {}),
+        )
+    except RuntimeError:
+        # GTSAM can reject an indeterminate factor graph before write-back.
+        restore()
+        raise
+    if stats["rejected"] or stats.get("num_imu_states", 0) < 2:
+        restore()
+        print("  IMU initialization refinement rejected; restored previous map and IMU states")
+        return None
+    # The fallback bridge must use the jointly refined bias, not the discarded
+    # closed-form proposal. Preserve the proposal separately for diagnostics.
+    last = world_map.keyframes[max(apply_ids, key=lambda i: world_map.keyframes[i].timestamp_ns)]
+    if last.imu_bias is not None:
+        diag["proposed_accel_bias"] = diag["accel_bias"].copy()
+        diag["proposed_gyro_bias"] = diag["gyro_bias"].copy()
+        diag["accel_bias"] = last.imu_bias[:3].copy()
+        diag["gyro_bias"] = last.imu_bias[3:].copy()
+    diag["refinement"] = stats
+    return diag

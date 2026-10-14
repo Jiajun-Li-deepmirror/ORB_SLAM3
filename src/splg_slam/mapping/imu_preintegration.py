@@ -6,7 +6,8 @@ from splg_slam.data.euroc import ImuCalibration
 
 
 def make_preintegration_params(
-    imu_calib: ImuCalibration, gravity_norm: float, integration_sigma: float
+    imu_calib: ImuCalibration, gravity_norm: float, integration_sigma: float,
+    bias_init_covariance: float | None = None,
 ) -> gtsam.PreintegrationCombinedParams:
     params = gtsam.PreintegrationCombinedParams(np.array([0.0, 0.0, -gravity_norm]))
     params.setAccelerometerCovariance(np.eye(3) * imu_calib.accel_noise_density ** 2)
@@ -14,6 +15,15 @@ def make_preintegration_params(
     params.setIntegrationCovariance(np.eye(3) * integration_sigma ** 2)
     params.setBiasAccCovariance(np.eye(3) * imu_calib.accel_random_walk ** 2)
     params.setBiasOmegaCovariance(np.eye(3) * imu_calib.gyro_random_walk ** 2)
+    # GTSAM 4.2's legacy default adds I6 at every integration step and greatly
+    # weakens the IMU factors. Zero uses the sensor-noise model with graph bias
+    # priors/random walk. Keep that change explicit: full-sequence regression
+    # exposed large RealSense loop deformation when enabled unconditionally.
+    if bias_init_covariance is not None:
+        if not np.isfinite(bias_init_covariance) or bias_init_covariance < 0:
+            raise ValueError("bias_init_covariance must be finite and nonnegative")
+        if hasattr(params, "setBiasAccOmegaInit"):
+            params.setBiasAccOmegaInit(np.eye(6) * bias_init_covariance)
     return params
 
 
@@ -22,6 +32,26 @@ def bias_from_vector(vec: np.ndarray | None) -> imuBias.ConstantBias:
         return imuBias.ConstantBias()
     vec = np.asarray(vec)
     return imuBias.ConstantBias(vec[:3], vec[3:6])
+
+
+def imu_samples_between(measurements: np.ndarray, start_ns: int, end_ns: int) -> np.ndarray | None:
+    """Clip sorted Nx7 measurements to the complete camera-time interval.
+
+    Include synthetic rows at both endpoints, using the same zero-order hold as
+    preintegrate(). Never extrapolate beyond the recorded IMU coverage. Adjacent
+    intervals may share an endpoint; its zero dt is ignored by preintegrate().
+    """
+    if end_ns <= start_ns or len(measurements) < 2:
+        return None
+    ts = measurements[:, 0]
+    if start_ns < ts[0] or end_ns > ts[-1]:
+        return None
+    start = int(np.searchsorted(ts, start_ns, side="right"))
+    end = int(np.searchsorted(ts, end_ns, side="left"))
+    first = measurements[start - 1].copy()
+    last = measurements[int(np.searchsorted(ts, end_ns, side="right")) - 1].copy()
+    first[0], last[0] = start_ns, end_ns
+    return np.concatenate([first[None], measurements[start:end], last[None]], axis=0)
 
 
 def preintegrate(

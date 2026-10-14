@@ -11,6 +11,7 @@ matplotlib
 tqdm
 open3d
 lightglue @ git+https://github.com/cvg/LightGlue.git
-gtsam
+# Preintegration covariance defaults differ across releases; upgrades require full regression.
+gtsam==4.2
 rosbags
 octomap-python

@@ -241,7 +241,11 @@ def optimize_pose_graph(
         }
 
     for kf_id in kf_ids:
-        world_map.keyframes[kf_id].pose_cw = new_poses[kf_id]
+        kf = world_map.keyframes[kf_id]
+        if kf.velocity is not None:
+            correction_rotation = new_poses[kf_id][:3, :3].T @ old_poses[kf_id][:3, :3]
+            kf.velocity = correction_rotation @ kf.velocity
+        kf.pose_cw = new_poses[kf_id]
 
     for mp in world_map.map_points.values():
         if not mp.observations:

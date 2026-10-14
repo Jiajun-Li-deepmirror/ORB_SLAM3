@@ -18,7 +18,7 @@ from gtsam.symbol_shorthand import B, L, V, X
 from splg_slam.features.splg import SPLG
 from splg_slam.geometry.pnp import solve_pnp_ransac
 from splg_slam.geometry.pose_utils import camera_center
-from splg_slam.geometry.stereo import StereoRectifier
+from splg_slam.geometry.stereo import StereoRectifier, rectify_imu_calibration
 from splg_slam.localization.relocalizer import Relocalizer
 from splg_slam.map.world_map import WorldMap
 from splg_slam.mapping.gtsam_utils import (
@@ -27,7 +27,7 @@ from splg_slam.mapping.gtsam_utils import (
     pose_cw_to_body_gtsam,
     pose_cw_to_gtsam,
 )
-from splg_slam.mapping.imu_preintegration import bias_from_vector, preintegrate
+from splg_slam.mapping.imu_preintegration import bias_from_vector, imu_samples_between, preintegrate
 
 
 # Not a gtsam builtin shorthand - mirrors mapping/local_ba.py's own Y(): the IMU body-pose
@@ -150,7 +150,8 @@ class ContinuousLocalizer:
         self.n_track_jump_rejected = 0
         self.n_imu_only = 0
 
-        self.imu_calib = imu_calib
+        # Callers supply raw-camera extrinsics, while localization poses use rectified images.
+        self.imu_calib = rectify_imu_calibration(imu_calib, rectifier) if imu_calib is not None else None
         self.imu_params = imu_params
         self.imu_measurements = imu_measurements
         self.imu_enabled = imu_calib is not None and imu_params is not None and imu_measurements is not None
@@ -201,19 +202,10 @@ class ContinuousLocalizer:
         return pose_cw, int(inlier_mask.sum()), correspondences
 
     def _pull_imu_samples(self, start_ts_ns: int, end_ts_ns: int) -> np.ndarray | None:
-        """Slices self.imu_measurements for the raw rows strictly between two frame
-        timestamps - mirrors tracker.py's `_pull_imu_samples`/`_imu_bridge_pose_cw` pattern
-        exactly (same slicing, same preintegrate() call), just inlined here instead of
-        accumulating a pending-samples list across calls, since continuous_localizer only
-        ever needs "the samples since the reference frame", never a longer backlog."""
+        """Return samples covering both camera timestamps, without extrapolation."""
         if not self.imu_enabled:
             return None
-        ts_col = self.imu_measurements[:, 0]
-        start = np.searchsorted(ts_col, start_ts_ns, side="right")
-        end = np.searchsorted(ts_col, end_ts_ns, side="right")
-        if end <= start + 1:
-            return None
-        return self.imu_measurements[start:end]
+        return imu_samples_between(self.imu_measurements, start_ts_ns, end_ts_ns)
 
     def _dead_reckon_imu(self, timestamp_ns: int) -> tuple[np.ndarray, np.ndarray] | None:
         """Third fallback tier: predicts this frame's pose by integrating real IMU samples
@@ -494,12 +486,11 @@ def smooth_session_trajectory(
             ts_a, ts_b = session_log[i]["timestamp_ns"], session_log[i + 1]["timestamp_ns"]
             if ts_a is None or ts_b is None:
                 continue
-            ts_col = localizer.imu_measurements[:, 0]
-            start, end = np.searchsorted(ts_col, ts_a, side="right"), np.searchsorted(ts_col, ts_b, side="right")
-            if end <= start + 1:
+            samples = localizer._pull_imu_samples(ts_a, ts_b)
+            if samples is None:
                 continue
             bias_ref = bias_from_vector(session_log[i]["bias_vec"])
-            preint = preintegrate(localizer.imu_measurements[start:end], bias_ref, localizer.imu_params)
+            preint = preintegrate(samples, bias_ref, localizer.imu_params)
             graph.add(CombinedImuFactor(Y(i), V(i), Y(i + 1), V(i + 1), B(i), B(i + 1), preint))
             n_imu_factors += 1
         graph.add(PriorFactorVector(V(0), initial.atVector(V(0)), loose_vel_noise))

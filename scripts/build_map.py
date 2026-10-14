@@ -15,11 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from splg_slam.config import load_config
 from splg_slam.data.loader import dataset_dir, dataset_module
 from splg_slam.geometry.pose_utils import camera_center, invert_pose, pose_delta
-from splg_slam.geometry.stereo import MonoRectifier, StereoRectifier
+from splg_slam.geometry.stereo import MonoRectifier, StereoRectifier, rectify_imu_calibration
 from splg_slam.localization.retrieval import GlobalDescriptorExtractor, GlobalDescriptorIndex
 from splg_slam.map.io import save_map
 from splg_slam.mapping.gtsam_utils import gtsam_pose_to_cw, matrix_to_gtsam_pose3, pose_cw_to_body_gtsam
-from splg_slam.mapping.imu_init import run_dynamic_imu_init, run_periodic_imu_reinit
+from splg_slam.mapping.imu_init import initialize_imu_with_refinement
 from splg_slam.mapping.imu_preintegration import (
     bias_from_vector,
     make_preintegration_params,
@@ -382,6 +382,8 @@ def main():
             if _val is not None:
                 setattr(imu_calib, _field, float(_val))
                 print(f"  IMU calib: {_field} overridden by config (imu.{_cfg_name}) = {_val}")
+    if imu_calib is not None:
+        imu_calib = rectify_imu_calibration(imu_calib, rectifier)
     imu_measurements = dmod.load_imu_measurements(ddir) if imu_enabled and hasattr(dmod, "load_imu_measurements") else None
     if imu_measurements is not None:
         # imu.time_offset_ms: how far the IMU's timestamps run AHEAD of the camera's for the
@@ -486,7 +488,19 @@ def main():
         imu_measurements[:, 4:7] *= accel_scale_correction
         print(f"  IMU calib: accel readings scaled by {accel_scale_correction} (imu.accel_scale_correction) to correct this unit's uncalibrated accelerometer")
     imu_params = (
-        make_preintegration_params(imu_calib, cfg.imu.gravity_norm, cfg.imu.integration_sigma) if imu_enabled else None
+        make_preintegration_params(imu_calib, cfg.imu.gravity_norm, cfg.imu.integration_sigma,
+                                      bias_init_covariance=getattr(cfg.imu, "bias_init_covariance", None)) if imu_enabled else None
+    )
+
+    refine_after_init = bool(getattr(cfg.imu, "refine_after_init", False))
+    imu_refinement_options = dict(
+        enabled=refine_after_init,
+        k_rect=rectifier.K_rect, baseline=stereo_ba_baseline,
+        ba_kwargs=dict(
+            anchor_roll_pitch_sigma_deg=getattr(cfg.mapping, "ba_anchor_roll_pitch_sigma_deg", 5.0),
+            anchor_velocity_sigma=getattr(cfg.mapping, "ba_anchor_velocity_sigma", 1.0),
+            accel_bias_prior_sigma=getattr(cfg.mapping, "ba_accel_bias_prior_sigma", None),
+        ),
     )
 
     use_sensor_depth = not mono_mode and bool(getattr(cfg.dataset, "use_sensor_depth", False))
@@ -727,8 +741,9 @@ def main():
                         kf_id for kf_id in mapper.world_map.keyframe_ids_sorted()
                         if mapper.world_map.keyframes[kf_id].segment_id == mapper._current_segment_id
                     ]
-                    diag = run_dynamic_imu_init(
+                    diag = initialize_imu_with_refinement(
                         mapper.world_map, init_window, imu_calib, imu_params, cfg.imu.gravity_norm,
+                        **imu_refinement_options,
                         solve_scale=mono_mode,
                         # Mono's bootstrap solve also fixes *scale* (not just rotation), so an
                         # ill-conditioned early window can corrupt the whole map's metric size,
@@ -821,8 +836,9 @@ def main():
                             if mapper.world_map.keyframes[kf_id].segment_id == mapper._current_segment_id
                         ]
                         viba_stage = "kf20 refine"
-                        diag = run_dynamic_imu_init(
+                        diag = initialize_imu_with_refinement(
                             mapper.world_map, segment_kf_ids, imu_calib, imu_params, cfg.imu.gravity_norm,
+                            **imu_refinement_options,
                             solve_scale=mono_mode,
                             # Unlike the ORIGINAL kf10 bootstrap call above (intentionally
                             # unconditional - see its own docstring: a bad bootstrap there still
@@ -887,8 +903,9 @@ def main():
                             if mapper.world_map.keyframes[kf_id].segment_id == mapper._current_segment_id
                         ]
                         reinit_call_count += 1
-                        diag = run_dynamic_imu_init(
+                        diag = initialize_imu_with_refinement(
                             mapper.world_map, segment_kf_ids, imu_calib, imu_params, cfg.imu.gravity_norm,
+                            **imu_refinement_options,
                             solve_scale=mono_mode,
                             # See the matching comment on the kf20-refine call above - same fix,
                             # same reason (this is VIBA2's own permanent-once-applied risk: it's
@@ -932,8 +949,9 @@ def main():
                             segment_kf_ids if os.environ.get("CUMULATIVE_REINIT_WINDOW")
                             else segment_kf_ids[-reinit_window_kf:]
                         )
-                        diag = run_periodic_imu_reinit(
+                        diag = initialize_imu_with_refinement(
                             mapper.world_map, window_kf_ids, imu_calib, imu_params, cfg.imu.gravity_norm,
+                            periodic=True, **imu_refinement_options,
                             gravity_error_tolerance=reinit_gravity_tolerance,
                             best_gravity_error_so_far=None if os.environ.get("DISABLE_RATCHET") else reinit_best_gravity_error,
                             best_axis_diversity_so_far=None if os.environ.get("DISABLE_RATCHET") else reinit_best_axis_diversity,

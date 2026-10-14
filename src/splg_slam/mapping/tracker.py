@@ -23,6 +23,7 @@ from splg_slam.mapping.imu_preintegration import (
     bias_from_vector,
     gravity_alignment_rotation,
     heading_fix_rotation,
+    imu_samples_between,
     make_preintegration_params,
     preintegrate,
 )
@@ -270,7 +271,8 @@ class OfflineMapper:
         self.imu_measurements = imu_measurements
         self.imu_calib = imu_calib
         self._imu_params = (
-            make_preintegration_params(imu_calib, cfg.imu.gravity_norm, cfg.imu.integration_sigma)
+            make_preintegration_params(imu_calib, cfg.imu.gravity_norm, cfg.imu.integration_sigma,
+                                      bias_init_covariance=getattr(cfg.imu, "bias_init_covariance", None))
             if self.imu_enabled else None
         )
         self._imu_last_ts_ns: int | None = None
@@ -406,12 +408,25 @@ class OfflineMapper:
         if self._imu_last_ts_ns is None:
             self._imu_last_ts_ns = timestamp_ns
             return
-        ts_col = self.imu_measurements[:, 0]
-        start = np.searchsorted(ts_col, self._imu_last_ts_ns, side="right")
-        end = np.searchsorted(ts_col, timestamp_ns, side="right")
-        if end > start:
-            self._pending_imu_samples.append(self.imu_measurements[start:end])
+        samples = imu_samples_between(self.imu_measurements, self._imu_last_ts_ns, timestamp_ns)
+        if samples is not None:
+            self._pending_imu_samples.append(samples)
         self._imu_last_ts_ns = timestamp_ns
+
+    def _pending_imu_for_keyframe(self, timestamp_ns: int) -> np.ndarray | None:
+        """Only attach samples to states at their actual temporal endpoints.
+
+        Relocalization can select a historical visual reference; it must not turn
+        the short, current IMU interval into a factor from that historical pose.
+        """
+        if self.ref_keyframe is None or not self._pending_imu_samples:
+            return None
+        samples = np.concatenate(self._pending_imu_samples, axis=0)
+        if (len(samples) < 2
+                or samples[0, 0] != float(self.ref_keyframe.timestamp_ns)
+                or samples[-1, 0] != float(timestamp_ns)):
+            return None
+        return samples
 
     def _record_tracked_pose(self, pose_cw: np.ndarray, reset: bool = False) -> None:
         if reset:
@@ -860,8 +875,8 @@ class OfflineMapper:
             return None
         if self.ref_keyframe.velocity is None or not self._pending_imu_samples:
             return None
-        samples = np.concatenate(self._pending_imu_samples, axis=0)
-        if len(samples) < 2:
+        samples = self._pending_imu_for_keyframe(self._imu_last_ts_ns)
+        if samples is None:
             return None
         bias = bias_from_vector(self.ref_keyframe.imu_bias)
         preint = preintegrate(samples, bias, self._imu_params)
@@ -1093,8 +1108,8 @@ class OfflineMapper:
             if len(chained_samples) >= 2:
                 self.world_map.add_segment_transition_imu_samples(chained_anchor_id, frame_id, chained_samples)
         elif self.imu_tight_fusion and self.ref_keyframe is not None and self._pending_imu_samples:
-            samples = np.concatenate(self._pending_imu_samples, axis=0)
-            if len(samples) >= 2:
+            samples = self._pending_imu_for_keyframe(timestamp_ns)
+            if samples is not None:
                 self.world_map.add_segment_transition_imu_samples(self.ref_keyframe.frame_id, frame_id, samples)
         self._pending_imu_samples = []
 
@@ -1464,8 +1479,8 @@ class OfflineMapper:
         self, kf: KeyFrame, feats: dict, rect_left_img: np.ndarray,
         ref_matches: list[tuple[int, int]] | None = None,
     ) -> None:
-        if self.imu_tight_fusion and self.ref_keyframe is not None and self._pending_imu_samples:
-            samples = np.concatenate(self._pending_imu_samples, axis=0)
+        samples = self._pending_imu_for_keyframe(kf.timestamp_ns) if self.imu_tight_fusion else None
+        if samples is not None:
             prev_bias_vec = self.ref_keyframe.imu_bias
             kf.imu_bias = prev_bias_vec if prev_bias_vec is not None else np.zeros(6)
             # Only propagate a velocity when this segment's world frame has an actual

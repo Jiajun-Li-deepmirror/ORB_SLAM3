@@ -125,6 +125,8 @@ class WorldMap:
         for kf_id in kf_ids:
             kf = self.keyframes[kf_id]
             kf.pose_cw = kf.pose_cw @ transform_inv
+            if kf.velocity is not None:
+                kf.velocity = transform[:3, :3] @ kf.velocity
         for mp in self.map_points.values():
             observers = set(mp.observations.keys())
             if observers and observers <= kf_ids:
