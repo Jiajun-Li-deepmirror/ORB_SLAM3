@@ -4,6 +4,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import gtsam
@@ -13,7 +14,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from splg_slam.config import load_config
-from splg_slam.data.loader import dataset_dir, dataset_module
+from splg_slam.data.loader import dataset_dir, dataset_module, load_dataset_rig, set_dataset_dir
 from splg_slam.geometry.pose_utils import camera_center, invert_pose, pose_delta
 from splg_slam.geometry.stereo import MonoRectifier, StereoRectifier, rectify_imu_calibration
 from splg_slam.localization.retrieval import GlobalDescriptorExtractor, GlobalDescriptorIndex
@@ -307,11 +308,36 @@ def try_close_loops(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", type=str)
+    parser.add_argument("--dataset-dir", help="override the input directory for this dataset kind")
+    parser.add_argument("--output-dir", help="override output.map_dir")
+    parser.add_argument("--max-frames", type=int, help="limit the number of processed frames")
+    parser.add_argument("--frame-stride", type=int, help="process every Nth input frame")
     parser.add_argument("--seed", type=int, default=0, help="seeds numpy/torch/cv2-RANSAC so repeated runs are reproducible instead of drifting via unseeded RANSAC and GPU-kernel nondeterminism")
     args = parser.parse_args()
 
     set_global_seed(args.seed)
     cfg = load_config(args.config)
+    if args.dataset_dir:
+        set_dataset_dir(cfg, args.dataset_dir)
+    if args.output_dir:
+        cfg.output.map_dir = args.output_dir
+    for name in ("max_frames", "frame_stride"):
+        value = getattr(args, name)
+        if value is not None:
+            if value <= 0:
+                parser.error(f"--{name.replace('_', '-')} must be positive")
+            setattr(cfg.dataset, name, value)
+
+    def config_values(value):
+        if isinstance(value, SimpleNamespace):
+            return {key: config_values(item) for key, item in vars(value).items()}
+        if isinstance(value, list):
+            return [config_values(item) for item in value]
+        return value
+
+    output_dir = Path(cfg.output.map_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "config_effective.yaml").write_text(yaml.safe_dump(config_values(cfg), sort_keys=False))
 
     tracking_mode = getattr(cfg.tracking, "mode", "stereo")
     mono_mode = tracking_mode == "mono"
@@ -325,7 +351,7 @@ def main():
     # since extrinsics are a fixed hardware property. euroc/kitti's load_stereo_rig/
     # load_imu_calibration don't accept this kwarg at all, so it's only ever passed when set.
     tf_kwargs = {"tf_static_from": cfg.dataset.tf_static_from} if getattr(cfg.dataset, "tf_static_from", None) else {}
-    rig = dmod.load_stereo_rig(ddir, **tf_kwargs)  # still needed for cam0's own calibration/T_BS even in mono_mode
+    rig = load_dataset_rig(cfg)  # still needed for cam0's own calibration/T_BS even in mono_mode
     rectifier = MonoRectifier(rig.cam0) if mono_mode else StereoRectifier(rig)
     global_extractor = GlobalDescriptorExtractor() if getattr(cfg, "retrieval", None) and cfg.retrieval.enabled else None
     stereo_ba_baseline = (

@@ -9,7 +9,7 @@ import open3d as o3d
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from splg_slam.config import load_config
-from splg_slam.data.loader import dataset_dir, dataset_module, right_image_path
+from splg_slam.data.loader import iter_keyframe_stereo_images, load_dataset_rig, set_dataset_dir
 from splg_slam.geometry.stereo import StereoDepthEstimator, StereoRectifier
 from splg_slam.map.io import load_map
 
@@ -22,6 +22,7 @@ def main():
         "mechanism that will later run on real RealSense depth images."
     )
     parser.add_argument("config", type=str)
+    parser.add_argument("--dataset-dir", help="override the input dataset directory")
     parser.add_argument("map_path", type=str)
     parser.add_argument("out_path", type=str, help="output point cloud path (.ply or .pcd)")
     parser.add_argument("--voxel_size", type=float, default=0.05, help="meters, voxel filter resolution")
@@ -42,8 +43,10 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.dataset_dir:
+        set_dataset_dir(cfg, args.dataset_dir)
     world_map = load_map(args.map_path)
-    rig = dataset_module(cfg).load_stereo_rig(dataset_dir(cfg))
+    rig = load_dataset_rig(cfg)
     rectifier = StereoRectifier(rig)
     depth_est = StereoDepthEstimator(
         rectifier, min_disp=cfg.stereo.min_disp, num_disp=cfg.stereo.num_disp, block_size=cfg.stereo.block_size,
@@ -56,20 +59,11 @@ def main():
     global_cloud = o3d.geometry.PointCloud()
     n_used = 0
 
-    for count, kf_id in enumerate(kf_ids):
+    images = iter_keyframe_stereo_images(world_map, cfg, kf_ids, color_left=True)
+    for count, (kf_id, img_l_bgr, img_r) in enumerate(images):
         kf = world_map.keyframes[kf_id]
-        if kf.image_path is None:
-            continue
-        left_path = Path(kf.image_path)
-        right_path = right_image_path(left_path, cfg)
-        img_l = cv2.imread(str(left_path), cv2.IMREAD_GRAYSCALE)
-        img_r = cv2.imread(str(right_path), cv2.IMREAD_GRAYSCALE)
-        img_l_bgr = cv2.imread(str(left_path), cv2.IMREAD_COLOR)
-        if img_l is None or img_r is None:
-            continue
-
-        rect_l, rect_r = rectifier.rectify(img_l, img_r)
-        rect_l_bgr, _ = rectifier.rectify(img_l_bgr, img_l_bgr)
+        rect_l_bgr, rect_r = rectifier.rectify(img_l_bgr, img_r)
+        rect_l = cv2.cvtColor(rect_l_bgr, cv2.COLOR_BGR2GRAY)
         disp = depth_est.compute_disparity(rect_l, rect_r)
 
         if pixel_xy is None:
@@ -100,6 +94,8 @@ def main():
             global_cloud = global_cloud.voxel_down_sample(args.voxel_size)
             print(f"  [{count + 1}/{len(kf_ids)}] fused, {len(global_cloud.points)} points after downsample")
 
+    if n_used == 0 or len(global_cloud.points) == 0:
+        raise ValueError("No valid dense points were reconstructed; check dataset/map pairing and depth limits.")
     global_cloud = global_cloud.voxel_down_sample(args.voxel_size)
     if args.outlier_nb_neighbors > 0:
         n_before = len(global_cloud.points)
@@ -109,7 +105,8 @@ def main():
         print(f"Statistical outlier removal: {n_before} -> {len(global_cloud.points)} points")
 
     print(f"Final point cloud: {len(global_cloud.points)} points from {n_used} keyframes")
-    o3d.io.write_point_cloud(args.out_path, global_cloud)
+    if not o3d.io.write_point_cloud(args.out_path, global_cloud):
+        raise OSError(f"Failed to write point cloud: {args.out_path}")
     print(f"Saved to {args.out_path}")
 
 

@@ -1,5 +1,6 @@
 import argparse
 import csv
+import itertools
 import sys
 import time
 from pathlib import Path
@@ -10,7 +11,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from splg_slam.config import load_config
-from splg_slam.data.euroc import load_stereo_frames, load_stereo_rig
+from splg_slam.data.loader import dataset_dir, dataset_module, load_dataset_rig, read_frame_images, set_dataset_dir
 from splg_slam.geometry.alignment import umeyama
 from splg_slam.geometry.pose_utils import camera_center
 from splg_slam.geometry.stereo import StereoRectifier
@@ -19,9 +20,9 @@ from splg_slam.map.io import load_map
 from splg_slam.utils import nearest_indices
 
 
-def load_euroc_gt(mav0_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+def load_gt_csv(path: Path) -> tuple[np.ndarray, np.ndarray]:
     ts, xyz = [], []
-    with open(Path(mav0_dir) / "state_groundtruth_estimate0" / "data.csv") as f:
+    with open(path) as f:
         for row in csv.reader(f):
             if not row or row[0].startswith("#"):
                 continue
@@ -53,6 +54,8 @@ def main():
         "masking most queries."
     )
     parser.add_argument("config", type=str)
+    parser.add_argument("--dataset-dir", help="override the input dataset directory")
+    parser.add_argument("--gt-path", help="optional EuRoC-format ground-truth CSV")
     parser.add_argument("map_path", type=str)
     parser.add_argument("--start", type=int, default=0, help="query frame index start")
     parser.add_argument("--count", type=int, default=20, help="number of query frames")
@@ -75,7 +78,11 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.start < 0 or args.count <= 0 or args.stride <= 0:
+        parser.error("--start must be nonnegative; --count and --stride must be positive")
     cfg = load_config(args.config)
+    if args.dataset_dir:
+        set_dataset_dir(cfg, args.dataset_dir)
     if args.early_exit_inliers is not None:
         cfg.tracking.relocalization_early_exit_inliers = args.early_exit_inliers
     if args.max_keypoints is not None:
@@ -86,7 +93,7 @@ def main():
     world_map = load_map(args.map_path)
     print(f"Loaded map: {len(world_map.keyframes)} keyframes, {len(world_map.map_points)} map points")
 
-    rig = load_stereo_rig(cfg.dataset.mav0_dir)
+    rig = load_dataset_rig(cfg)
     rectifier = StereoRectifier(rig)
     relocalizer = Relocalizer(world_map, rectifier, cfg)
     print(
@@ -94,20 +101,25 @@ def main():
         f"max_keypoints={cfg.tracking.relocalization_max_keypoints} fp16={getattr(cfg.tracking, 'relocalization_fp16', False)}"
     )
 
-    gt_ts, gt_xyz = load_euroc_gt(cfg.dataset.mav0_dir)
-    r_fit, s_fit, t_fit = fit_map_to_gt(world_map, gt_ts, gt_xyz)
+    gt_ts = gt_xyz = None
+    gt_path = Path(args.gt_path) if args.gt_path else dataset_dir(cfg) / "state_groundtruth_estimate0" / "data.csv"
+    if args.gt_path or gt_path.is_file():
+        gt_ts, gt_xyz = load_gt_csv(gt_path)
+    if gt_ts is not None:
+        r_fit, s_fit, t_fit = fit_map_to_gt(world_map, gt_ts, gt_xyz)
+    else:
+        print("No ground truth supplied; reporting localization success and timing only.")
 
-    entries = load_stereo_frames(cfg.dataset.mav0_dir)
-    query_entries = entries[args.start: args.start + args.count * args.stride: args.stride]
+    entries = dataset_module(cfg).load_stereo_frames(dataset_dir(cfg))
+    query_entries = itertools.islice(entries, args.start, args.start + args.count * args.stride, args.stride)
 
     n_success = 0
     errors = []
     query_times_s = []
     for e in query_entries:
         t0 = time.monotonic()
-        img_l = cv2.imread(str(e.left_path), cv2.IMREAD_GRAYSCALE)
+        img_l, img_r = read_frame_images(e, stereo=args.load_unused_right_image)
         if args.load_unused_right_image:
-            img_r = cv2.imread(str(e.right_path), cv2.IMREAD_GRAYSCALE)
             rect_l, _ = rectifier.rectify(img_l, img_r)
         else:
             rect_l = rectifier.rectify_left(img_l)
@@ -117,21 +129,29 @@ def main():
 
         if ok:
             n_success += 1
-            center = camera_center(pose_cw)
-            est_gt = s_fit * (r_fit @ center) + t_fit
-            gt_i = int(nearest_indices(gt_ts, e.timestamp_ns))
-            err_m = float(np.linalg.norm(est_gt - gt_xyz[gt_i]))
-            errors.append(err_m)
+            accuracy = ""
+            if gt_ts is not None:
+                center = camera_center(pose_cw)
+                est_gt = s_fit * (r_fit @ center) + t_fit
+                gt_i = int(nearest_indices(gt_ts, e.timestamp_ns))
+                err_m = float(np.linalg.norm(est_gt - gt_xyz[gt_i]))
+                errors.append(err_m)
+                accuracy = f"gt_err={err_m:.3f}m "
             print(
                 f"frame {e.index} ts={e.timestamp_ns}: OK  inliers={info['num_inliers']} "
                 f"candidate_kf={info['candidate_kf']} sim={info['retrieval_sim']:.3f} "
-                f"gt_err={err_m:.3f}m ({query_times_s[-1]*1000:.0f}ms)"
+                f"{accuracy}({query_times_s[-1]*1000:.0f}ms)"
             )
         else:
             print(f"frame {e.index} ts={e.timestamp_ns}: FAILED ({info.get('reason')}) ({query_times_s[-1]*1000:.0f}ms)")
 
+    close = getattr(entries, "close", None)
+    if close is not None:
+        close()
+    if not query_times_s:
+        raise ValueError("No query frames in the requested range")
     times_ms = np.array(query_times_s) * 1000.0
-    print(f"\n{n_success}/{len(query_entries)} localized")
+    print(f"\n{n_success}/{len(query_times_s)} localized")
     print(
         f"Per-query time (ms): mean={times_ms.mean():.1f} median={np.median(times_ms):.1f} "
         f"min={times_ms.min():.1f} max={times_ms.max():.1f} -> {1000.0/times_ms.mean():.2f} fps (mean)"
