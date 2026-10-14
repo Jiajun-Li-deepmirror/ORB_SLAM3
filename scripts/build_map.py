@@ -1085,7 +1085,9 @@ def main():
                             f"axis_diversity={diag['rotation_axis_diversity']:.3f})"
                         )
 
-                if cfg.mapping.periodic_local_ba_enabled and n_keyframes % cfg.mapping.local_ba_every_n_kf == 0:
+                backend_updated = just_reinitialized
+                if (cfg.mapping.periodic_local_ba_enabled and n_keyframes % cfg.mapping.local_ba_every_n_kf == 0
+                    and not (just_reinitialized and refine_after_init)):
                     window = mapper.world_map.covisible_window(
                         result.frame_id, window_size=cfg.mapping.local_ba_window_size,
                         min_shared=cfg.mapping.local_ba_min_shared,
@@ -1127,6 +1129,7 @@ def main():
                             lm_max_iterations=getattr(cfg.mapping, "local_ba_max_iterations", 6),
                             lm_relative_error_tol=getattr(cfg.mapping, "local_ba_relative_error_tol", 1e-2),
                         )
+                        backend_updated |= not ba_stats["rejected"]
                         if ba_stats["rejected"]:
                             print(
                                 f"  local BA around kf{result.frame_id} REJECTED (would move a keyframe "
@@ -1138,10 +1141,12 @@ def main():
                     del os.environ["DEBUG_PRE_MERGE_FRAME"]
 
                 if loop_enabled and n_keyframes % loop_cfg.every_n_kf == 0:
-                    n_loops += try_close_loops(
+                    closed = try_close_loops(
                         mapper, rectifier, retrieval_index, loop_cfg, loop_feats_cache,
                         loop_consistency, result.frame_id,
                     )
+                    n_loops += closed
+                    backend_updated |= bool(closed)
 
                 if cfg.mapping.keyframe_culling_enabled and n_keyframes % cfg.mapping.keyframe_culling_every_n_kf == 0:
                     # Own window size/min_shared, decoupled from local_ba_window_size - the
@@ -1194,6 +1199,12 @@ def main():
                         if mapper.reloc_index is not None:
                             mapper.reloc_index.build(mapper.world_map)
                         print(f"  culled {len(redundant)} redundant keyframe(s): {redundant}")
+
+                if backend_updated:
+                    # Backend updates replace pose arrays; discard stale motion-model history.
+                    mapper._record_tracked_pose(result.pose_cw, reset=True)
+                    if mapper.last_frame is not None and mapper.last_frame.frame_id == result.frame_id:
+                        mapper.last_frame.pose_cw = result.pose_cw.copy()
 
         mapper.world_map.frame_processing_times_s.append(time.monotonic() - t_frame_start)
 
@@ -1645,6 +1656,9 @@ def main():
             )
 
     out_path = Path(cfg.output.map_dir) / "map.pkl"
+    if hasattr(mapper.world_map, "frame_trajectory"):
+        trajectory_stats = mapper.world_map.frame_trajectory.export(mapper.world_map, out_path.parent)
+        print(f"Frame trajectory saved: {trajectory_stats}")
     save_map(mapper.world_map, out_path)
     print(f"Map saved to {out_path}")
 

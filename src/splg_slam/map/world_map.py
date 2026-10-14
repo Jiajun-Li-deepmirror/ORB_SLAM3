@@ -260,6 +260,8 @@ class WorldMap:
         keyframe culling: once almost everything a keyframe sees is already covered by
         several other keyframes, it adds nothing further and only grows the covisibility
         graph / BA problem size for no benefit."""
+        if kf_id in self.keyframes and hasattr(self, "frame_trajectory"):
+            self.frame_trajectory.retire_anchor(self, kf_id)
         kf = self.keyframes.pop(kf_id, None)
         if kf is None:
             return

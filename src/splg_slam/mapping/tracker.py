@@ -14,6 +14,7 @@ from splg_slam.geometry.pose_utils import camera_center, pose_delta
 from splg_slam.geometry.stereo import StereoDepthEstimator, StereoRectifier
 from splg_slam.geometry.triangulation import triangulate_points
 from splg_slam.localization.retrieval import GlobalDescriptorIndex
+from splg_slam.map.frame_trajectory import FrameTrajectory
 from splg_slam.map.frame import Frame
 from splg_slam.map.keyframe import KeyFrame
 from splg_slam.map.world_map import WorldMap
@@ -219,7 +220,7 @@ class OfflineMapper:
         self.ref_keyframe: KeyFrame | None = None
         self.ref_feats: dict | None = None
         self.last_frame: Frame | None = None
-        # Last 1-2 successfully-tracked poses (keyframe or not), for the motion-model
+        # Last 1-2 accepted poses or unvalidated dead-reckoning predictions, for the motion-model
         # tracking fallback's constant-velocity prediction (see _predict_pose). Reset to a
         # single entry after a relocalization jump (not real continuous motion), left
         # untouched while mono's bootstrap is still waiting for parallax.
@@ -302,16 +303,33 @@ class OfflineMapper:
         )
 
     def _pose_jump_threshold_m(self, timestamp_ns: int) -> float:
-        """Current max_pose_jump_m to check `translation` (relative to ref_keyframe)
-        against - a fixed config value if given, else effective_max_speed_mps (see
-        _update_speed_threshold) times the actual elapsed time since ref_keyframe, floored
-        at pose_jump_min_floor_m so a very small dt doesn't produce a degenerately tight
-        threshold before the speed estimate itself has stabilized."""
+        """Translation limit over the interval since the last accepted frame.
+
+        A visual reference may be an old retrieval candidate; its age and distance
+        are keyframe-selection geometry, not a measure of temporal continuity.
+        Unvalidated motion-model predictions never update last_frame. The opt-in
+        continuous-IMU mode does accept explicitly marked IMU-only frames.
+        """
         if self._pose_jump_m_fixed:
             return self._effective_max_pose_jump_m
-        dt_s = max((timestamp_ns - self.ref_keyframe.timestamp_ns) / 1.0e9, 1.0e-3)
+        reference = self.last_frame if self.last_frame is not None else self.ref_keyframe
+        dt_s = max((timestamp_ns - reference.timestamp_ns) / 1.0e9, 1.0e-3)
         floor_m = getattr(self.cfg.tracking, "pose_jump_min_floor_m", 0.5)
         return max(self._effective_max_speed_mps * dt_s, floor_m)
+
+    def _motion_continuity(self, pose_cw: np.ndarray, timestamp_ns: int) -> dict:
+        reference = self.last_frame if self.last_frame is not None else self.ref_keyframe
+        finite = bool(np.isfinite(pose_cw).all())
+        translation, rotation = pose_delta(reference.pose_cw, pose_cw) if finite else (None, None)
+        limit = self._pose_jump_threshold_m(timestamp_ns)
+        dt_s = max((timestamp_ns - reference.timestamp_ns) / 1.0e9, 1.0e-3)
+        return dict(reference_frame_id=int(reference.frame_id),
+                    reference_timestamp_ns=int(reference.timestamp_ns), dt_s=float(dt_s),
+                    reference_imu_only=bool(getattr(reference, "imu_only", False)),
+                    translation_m=None if translation is None else float(translation),
+                    rotation_deg=None if rotation is None else float(rotation),
+                    translation_limit_m=float(limit), rotation_limit_deg=float(self.max_pose_jump_deg),
+                    accepted=finite and translation <= limit and rotation <= self.max_pose_jump_deg)
 
     def _update_depth_estimates(self, depths: np.ndarray) -> None:
         """Rolling-window re-estimation of stereo.max_depth_m and tracking.keyframe_
@@ -371,7 +389,7 @@ class OfflineMapper:
 
     def _update_speed_threshold(self, implied_speed_mps: float) -> None:
         """Called on every accepted (non-rejected) tracked frame with translation/dt since
-        ref_keyframe - see __init__'s comment on why speed, not raw distance. Rolling window
+        the last accepted frame (the same interval as the motion gate). Rolling window
         (speed_window_frames, default 150) robust statistic: median + 10x a MAD-based sigma
         estimate, floored at speed_min_floor_mps. 10x and the 1.4826 MAD-to-sigma factor are
         universal statistics constants, not per-dataset tuning. The floor guards against a
@@ -437,7 +455,7 @@ class OfflineMapper:
             self._pose_history.pop(0)
 
     def _predict_pose(self) -> np.ndarray | None:
-        """Constant-velocity extrapolation from the last two successfully-tracked poses -
+        """Constant-velocity extrapolation from the last two poses/predictions -
         used by _try_motion_model_tracking. None until at least two prior poses exist (the
         first couple of frames), in which case that tier is simply skipped."""
         if len(self._pose_history) < 2:
@@ -562,6 +580,39 @@ class OfflineMapper:
 
     def _process_frame(self, rect_l: np.ndarray, feats: dict, kpts: np.ndarray, desc: np.ndarray,
                         depths: np.ndarray, timestamp_ns: int, image_path: str | None):
+        # Instrument the common frontend entry, including every early return.
+        self._frame_diagnostics = {"attempts": []}
+        self._tracking_route = "initializing"
+        frame_id = self._next_frame_id
+        previous_ref = None if self.ref_keyframe is None else self.ref_keyframe.frame_id
+        previous_segments, previous_relocs = self.n_map_segments, self.n_relocalizations
+        frame, is_kf = self._process_frame_impl(rect_l, feats, kpts, desc, depths, timestamp_ns, image_path)
+        if frame is None:
+            status = "lost"
+        elif getattr(frame, "imu_only", False):
+            status = "imu_only"
+        elif self.n_map_segments > previous_segments:
+            status = "new_segment"
+        elif self.n_relocalizations > previous_relocs:
+            status = "relocalized"
+        elif self.mono_mode and self.mono_bootstrap_pending:
+            status = "bootstrap_wait"
+        else:
+            status = "initialized" if previous_ref is None else "tracked"
+        self._frame_diagnostics.update(route=self._tracking_route, previous_reference_id=previous_ref,
+                                       consecutive_lost=int(self._consecutive_lost), total_keypoints=len(kpts))
+        if self.track_stats and self.track_stats[-1]["frame_id"] == frame_id:
+            self._frame_diagnostics.update(self.track_stats[-1])
+        if not hasattr(self.world_map, "frame_trajectory"):
+            self.world_map.frame_trajectory = FrameTrajectory()
+        anchor_id = None if self.ref_keyframe is None else self.ref_keyframe.frame_id
+        self.world_map.frame_trajectory.append(
+            self.world_map, frame_id, timestamp_ns, frame, is_kf, anchor_id, status,
+            self._frame_diagnostics, final_supported=not self.mono_mode)
+        return frame, is_kf
+
+    def _process_frame_impl(self, rect_l: np.ndarray, feats: dict, kpts: np.ndarray, desc: np.ndarray,
+                            depths: np.ndarray, timestamp_ns: int, image_path: str | None):
         frame_id = self._next_frame_id
         self._next_frame_id += 1
 
@@ -719,6 +770,7 @@ class OfflineMapper:
                       f"{', IMU-scaled' if imu_scale is not None else ''})")
             return kf, True
 
+        self._tracking_route = "reference"
         tracked = self._try_track_against_ref(matches, kpts, desc, rect_l)
         used_motion_model = False
         used_imu_bridge_prediction = False
@@ -732,6 +784,7 @@ class OfflineMapper:
             # needs "a similar descriptor near where geometry predicts", not a LightGlue
             # graph match between two full images.
             predicted = self._predict_pose()
+            self._tracking_route = "motion_model"
             tracked = self._try_motion_model_tracking(kpts, desc, rect_l, predicted, depths)
             used_motion_model = tracked is not None
             if tracked is None and self.imu_tight_fusion:
@@ -754,68 +807,31 @@ class OfflineMapper:
                 # cheaper constant-velocity guess has already failed.
                 imu_predicted = self._imu_bridge_pose_cw()
                 if imu_predicted is not None:
+                    self._tracking_route = "imu_bridge"
                     tracked = self._try_motion_model_tracking(kpts, desc, rect_l, imu_predicted, depths)
                     if tracked is not None:
                         used_motion_model = True
                         used_imu_bridge_prediction = True
                         predicted = imu_predicted
         if tracked is None:
-            result = self._on_tracking_failure(rect_l, feats, kpts, desc, depths, frame_id, timestamp_ns)
-            if result[0] is not None:
-                self._consecutive_lost = 0
-                return result
-            self._consecutive_lost += 1
-            if predicted is not None:
-                # Total loss this frame (relocalization also failed): still advance the
-                # dead-reckoning chain using this frame's own prediction, so the NEXT
-                # frame's constant-velocity guess keeps pace with elapsed time instead of
-                # staying frozen at the last *validated* pose.
-                self._record_tracked_pose(predicted)
-            reinit_after = getattr(self.cfg.tracking, "reinit_after_lost_frames", 15)
-            if self._consecutive_lost >= reinit_after:
-                if getattr(self.cfg.tracking, "continuous_imu_tracking", False):
-                    # EXPERIMENTAL, opt-in, off by default: rather than cutting into a new
-                    # Atlas segment, keep tracking going via pure IMU prediction (see
-                    # _insert_imu_only_keyframe) - deliberately does NOT reset
-                    # _consecutive_lost, so if vision is still lost next frame too, this
-                    # same branch fires again immediately (one IMU-only keyframe per lost
-                    # frame) instead of needing another full reinit_after-frame buildup each
-                    # time.
-                    imu_only_result = self._insert_imu_only_keyframe(
-                        kpts, desc, depths, rect_l, feats, frame_id, timestamp_ns, image_path
-                    )
-                    if imu_only_result is not None:
-                        return imu_only_result
-                    # IMU state isn't usable (or the predicted pose failed the sanity
-                    # check) - fall through to the Atlas safety net below, same as when
-                    # continuous_imu_tracking is off.
-                # ORB-SLAM3 Atlas-style recovery: a sustained loss almost always means the
-                # camera moved into territory the map never covered (that's *why* neither
-                # tracking tier nor relocalization can find anything) - waiting for it to
-                # wander back is hopeless, so start a fresh map segment right here. Stereo
-                # segments need no bootstrap wait (see _start_new_map_segment) since a
-                # single stereo frame already has metric depth.
-                return self._start_new_map_segment(kpts, desc, depths, rect_l, feats, frame_id, timestamp_ns, image_path)
-            return result
-        self._consecutive_lost = 0
+            return self._recover_tracking_failure(
+                rect_l, feats, kpts, desc, depths, frame_id, timestamp_ns, image_path, predicted)
         pose_cw, point_ids, kp_idx_list, inlier_mask, num_local_map_matches = tracked
 
-        translation, rotation_deg = pose_delta(self.ref_keyframe.pose_cw, pose_cw)
-        if (
-            translation > self._pose_jump_threshold_m(timestamp_ns)
-            or rotation_deg > self.max_pose_jump_deg
-        ):
-            # A "valid" (enough inliers, low reprojection error) but physically
-            # implausible PnP solution - e.g. a near-degenerate point configuration in a
-            # repetitive scene. Silently accepting this creates a keyframe at a nonsense
-            # position that every later frame then tracks forward from. Treat it as a
-            # tracking failure instead of a keyframe.
-            return self._on_tracking_failure(rect_l, feats, kpts, desc, depths, frame_id, timestamp_ns)
+        continuity = self._motion_continuity(pose_cw, timestamp_ns)
+        self._frame_diagnostics["motion_continuity"] = continuity
+        if not continuity["accepted"]:
+            self._frame_diagnostics["pose_jump_rejection"] = continuity.copy()
+            return self._recover_tracking_failure(
+                rect_l, feats, kpts, desc, depths, frame_id, timestamp_ns, image_path, predicted)
 
+        self._consecutive_lost = 0
         if not self._pose_jump_m_fixed:
-            dt_s = max((timestamp_ns - self.ref_keyframe.timestamp_ns) / 1.0e9, 1.0e-3)
-            self._update_speed_threshold(translation / dt_s)
+            self._update_speed_threshold(continuity["translation_m"] / continuity["dt_s"])
 
+        # Keyframe insertion still measures baseline/parallax against the visual
+        # reference; this is deliberately separate from the temporal motion gate.
+        translation, rotation_deg = pose_delta(self.ref_keyframe.pose_cw, pose_cw)
         frame = Frame(
             frame_id=frame_id, timestamp_ns=timestamp_ns,
             keypoints=kpts, descriptors=desc, depths=depths, pose_cw=pose_cw,
@@ -850,6 +866,29 @@ class OfflineMapper:
                 kf.map_point_ids[kp_i] = pid
         self._insert_keyframe(kf, feats, rect_l, ref_matches=matches)
         return kf, True
+
+    def _recover_tracking_failure(self, rect_l, feats, kpts, desc, depths, frame_id,
+                                  timestamp_ns, image_path, predicted):
+        """Count every failed image once, including a rejected PnP solution."""
+        result = self._on_tracking_failure(rect_l, feats, kpts, desc, depths, frame_id, timestamp_ns)
+        if result[0] is not None:
+            self._consecutive_lost = 0
+            return result
+        self._consecutive_lost += 1
+        if predicted is not None:
+            # Advance only the prediction chain, never the accepted temporal reference.
+            self._record_tracked_pose(predicted)
+        reinit_after = getattr(self.cfg.tracking, "reinit_after_lost_frames", 15)
+        if self._consecutive_lost >= reinit_after:
+            if getattr(self.cfg.tracking, "continuous_imu_tracking", False):
+                imu_only_result = self._insert_imu_only_keyframe(
+                    kpts, desc, depths, rect_l, feats, frame_id, timestamp_ns, image_path)
+                if imu_only_result is not None:
+                    # Vision is still lost: do not reset the failure streak here.
+                    return imu_only_result
+            return self._start_new_map_segment(
+                kpts, desc, depths, rect_l, feats, frame_id, timestamp_ns, image_path)
+        return result
 
     def _imu_bridge_pose_cw(self) -> np.ndarray | None:
         """tight_fusion, after IMU init: propagates the last keyframe's state through every
@@ -908,8 +947,9 @@ class OfflineMapper:
         predicted_pose = self._imu_bridge_pose_cw()
         if predicted_pose is None:
             return None
-        translation, rotation_deg = pose_delta(self.ref_keyframe.pose_cw, predicted_pose)
-        if translation > self._pose_jump_threshold_m(timestamp_ns) or rotation_deg > self.max_pose_jump_deg:
+        continuity = self._motion_continuity(predicted_pose, timestamp_ns)
+        self._frame_diagnostics["imu_only_continuity"] = continuity
+        if not continuity["accepted"]:
             return None
         kf = KeyFrame(
             frame_id=frame_id, timestamp_ns=timestamp_ns,
@@ -1328,6 +1368,15 @@ class OfflineMapper:
             reason = "close_points"
         return need, reason
 
+    def _tracking_pnp(self, obj_pts, img_pts, *args, **kwargs):
+        result = solve_pnp_ransac(obj_pts, img_pts, *args, **kwargs)
+        ok, _, inliers = result
+        if hasattr(self, "_frame_diagnostics"):
+            self._frame_diagnostics["attempts"].append(dict(
+                route=self._tracking_route, correspondences=len(obj_pts), success=bool(ok),
+                inliers=0 if inliers is None else int(inliers.sum())))
+        return result
+
     def _try_track_against_ref(self, matches, kpts: np.ndarray, desc: np.ndarray, rect_l: np.ndarray):
         """Tier 1 (primary): PnP against the reference keyframe's LightGlue matches, then
         expand correspondences via the local map (search_local_map) and re-solve. Returns
@@ -1358,7 +1407,7 @@ class OfflineMapper:
                 point_ids.append(int(mp_id))
                 kp_idx_list.append(int(cur_i))
 
-        ok, pose_init, _ = solve_pnp_ransac(
+        ok, pose_init, _ = self._tracking_pnp(
             np.asarray(obj_pts), np.asarray(img_pts), self.rectifier.K_rect,
             reproj_threshold_px=self.cfg.tracking.pnp_reproj_threshold_px,
         )
@@ -1385,7 +1434,7 @@ class OfflineMapper:
         point_ids = point_ids + lm_pids
         kp_idx_list = kp_idx_list + lm_kpidx
 
-        ok, pose_cw, inlier_mask = solve_pnp_ransac(
+        ok, pose_cw, inlier_mask = self._tracking_pnp(
             obj_pts, img_pts, self.rectifier.K_rect,
             reproj_threshold_px=self.cfg.tracking.pnp_reproj_threshold_px,
         )
@@ -1458,12 +1507,14 @@ class OfflineMapper:
             radius_px=radius_px,
             desc_threshold=getattr(self.cfg.tracking, "motion_model_desc_threshold", 0.75),
         )
+        if hasattr(self, "_frame_diagnostics"):
+            self._frame_diagnostics["attempts"].append(dict(route=self._tracking_route, stage="projection_matches", correspondences=len(mm_obj), required=int(self.cfg.tracking.min_inlier_matches)))
         if len(mm_obj) < self.cfg.tracking.min_inlier_matches:
             if debug:
                 print(f"    [motion-model] ref_kf{self.ref_keyframe.frame_id}: {len(point_ids)} candidates, only {len(mm_obj)} matched (need {self.cfg.tracking.min_inlier_matches})")
             return None
 
-        ok, pose_cw, inlier_mask = solve_pnp_ransac(
+        ok, pose_cw, inlier_mask = self._tracking_pnp(
             np.asarray(mm_obj), np.asarray(mm_img), self.rectifier.K_rect,
             reproj_threshold_px=self.cfg.tracking.pnp_reproj_threshold_px,
         )
@@ -1624,9 +1675,11 @@ class OfflineMapper:
                     obj_pts.append(self.world_map.map_points[mp_id].position)
                     img_pts.append(kpts[cur_i])
 
+            if hasattr(self, "_frame_diagnostics"):
+                self._frame_diagnostics["attempts"].append(dict(route="relocalization", candidate_id=int(kf_id), stage="candidate_matches", correspondences=len(obj_pts), required=int(self.cfg.tracking.min_inlier_matches)))
             if len(obj_pts) < self.cfg.tracking.min_inlier_matches:
                 continue
-            ok, pose_cw, inlier_mask = solve_pnp_ransac(
+            ok, pose_cw, inlier_mask = self._tracking_pnp(
                 np.asarray(obj_pts), np.asarray(img_pts), self.rectifier.K_rect,
                 reproj_threshold_px=self.cfg.tracking.pnp_reproj_threshold_px,
             )
@@ -1665,6 +1718,8 @@ class OfflineMapper:
         return best
 
     def _on_tracking_failure(self, rect_l, feats, kpts, desc, depths, frame_id, timestamp_ns):
+        self._frame_diagnostics["failed_tracking_route"] = self._tracking_route
+        self._tracking_route = "relocalization"
         reloc = self._try_relocalize(rect_l, feats, kpts)
         if reloc is None:
             return None, False
