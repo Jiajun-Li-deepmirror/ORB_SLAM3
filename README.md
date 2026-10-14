@@ -44,8 +44,8 @@ Supported input formats, selected per run via a config file:
 ## Installation
 
 ```bash
-git clone <this-repo-url>
-cd splg_slam_frontend
+git clone -b SPLG <this-repo-url> splg_slam
+cd splg_slam
 
 python3.10 -m venv .venv
 source .venv/bin/activate
@@ -77,6 +77,19 @@ Notes:
 ```bash
 python scripts/build_map.py configs/euroc_mh01_stereo_imu.yaml
 ```
+
+The input and output locations can be overridden on the command line instead of
+editing the YAML; `--max-frames N` / `--frame-stride N` limit a run for quick checks:
+
+```bash
+python scripts/build_map.py configs/realsense_current_stereo_imu.yaml \
+  --dataset-dir /path/to/rosbag2_dir \
+  --output-dir /path/to/output_dir
+```
+
+`configs/realsense_current_stereo_imu.yaml` is the reference config for the calibrated
+D435i (IMU time offset, gyro scale, accelerometer bias prior). The dated `realsense_*`
+configs point at specific earlier recordings.
 
 This runs the full offline pipeline (tracking → local BA → loop closure → final global
 BA) and writes a pickled `WorldMap` (keyframes, map points, poses) under `output.map_dir`.
@@ -139,6 +152,47 @@ Allan-variance calibration).
 All scripts take a config path (or a built map path) as their first argument; run with
 `--help` for the full option list.
 
+`dense_map.py` and `localize.py` read rosbag2 inputs directly and accept `--dataset-dir`.
+`localize.py` picks up EuRoC ground truth automatically (or `--gt-path data.csv`) and
+otherwise reports only success rate and timing.
+
+### Per-frame trajectories and tracking diagnostics
+
+Besides `map.pkl`, `build_map.py` writes to `output.map_dir`:
+
+| File | Content |
+| --- | --- |
+| `config_effective.yaml` | the config after command-line overrides |
+| `tracking_frames.jsonl` | one record per image: tracking status/route, reference keyframe, PnP attempts and inliers, pose-jump gate values |
+| `trajectory_frames.npz` | timestamps, online and final poses, statuses (lost frames are NaN) |
+| `trajectory_frames_{online,final}.tum` | valid poses only, `T_world_rectified_cam0` |
+| `trajectory_frames_metadata.json` | coverage and conventions |
+
+*Online* poses are recorded right after frontend tracking, so the world frame can shift
+when IMU initialization or the backend updates the map — don't align them globally.
+*Final* poses compose each frame's measured pose relative to its reference keyframe with
+that keyframe's final pose (no per-frame optimization or interpolation).
+
+To evaluate image-frame accuracy on EuRoC (fixed-scale SE(3) alignment, camera-centre
+ground truth, no trimming), optionally against a second run:
+
+```bash
+python scripts/evaluate_frames.py /path/to/run --compare /path/to/reference_run
+```
+
+Sequences without ground truth still get status and trajectory plots.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The tests use synthetic geometry and small image fixtures (no model downloads). They
+cover IMU interval integration, rectified camera/IMU extrinsics, velocity transport under
+pose corrections, IMU initialization and rollback, loop verification/rollback, tracking
+continuity, per-frame trajectory export and file/rosbag input handling.
+
 ## Configuration
 
 Every run is driven by a single YAML file (see `configs/` for full worked examples).
@@ -163,6 +217,14 @@ Every field in the shipped configs carries an inline comment explaining its defa
 when you'd want to change it — start from the closest matching example (dataset kind +
 stereo-only vs. stereo+IMU) rather than writing one from scratch.
 
+Experimental IMU options, **off by default** (in testing they lowered EuRoC ATE but
+deformed long RealSense loops):
+
+- `imu.bias_init_covariance: 0.0` — drop GTSAM's extra initial-bias covariance from
+  preintegration (unset keeps the library default).
+- `imu.refine_after_init: true` — run a joint BA right after each closed-form IMU
+  initialization and roll the map back if it is rejected.
+
 ## Repository layout
 
 ```
@@ -180,4 +242,5 @@ src/splg_slam/
   utils/        seeding, misc helpers
 scripts/        CLI entry points (see table above)
 configs/        example configs for EuRoC/KITTI/RealSense, stereo-only and stereo+IMU
+tests/          unit tests (python -m unittest)
 ```
