@@ -11,6 +11,15 @@ dataset:
 features:
   max_keypoints: 1024        # SuperPoint keypoint cap per image
 
+# Optional geometric ground landmarks from recorded depth. Camera height is free;
+# distinct/nonoverlapping planes keep independent heights (including other floors).
+# Requires rosbag2 stereo+IMU. Does not change the visual feature depth source above.
+ground_plane:
+  enabled: false
+  distance_sigma_m: 0.06
+  normal_sigma_deg: 3.0
+  gravity_sigma_deg: 5.0
+
 dynamic_objects:
   enabled: false              # DynamicVINS-style: drop keypoints landing on detected people
   score_threshold: 0.6        # detector confidence threshold (PersonDetector default)
@@ -32,7 +41,15 @@ imu:
   init_static_samples: 200             # leading samples averaged for static-window gravity bootstrap
   init_gyro_static_threshold: 0.05     # rad/s; below this -> static init, else ORB-SLAM-style dynamic init
   init_dynamic_window_kf: 10           # keyframes collected before solving the dynamic-init closed-form system
-  t_cam0_body_override: null           # set a 4x4 matrix here only if the rig's own IMU-cam extrinsic is known bad
+  # Kalibr IMU->cam0 (infra1) extrinsic for this unit (2026-10-15, AprilGrid, reprojection
+  # 0.20 px; tools/kalibr_d435i/results/kalibr_d435i_20261015_224910). /tf_static only carries the nominal
+  # identity rotation, ~1.04 deg off. Kalibr's timeshift is not used for time_offset_ms below:
+  # the image stamp marks end of exposure, so it varies with exposure.
+  t_cam0_body_override:
+    - [0.999869169, -0.011286902, 0.011586623, 0.005790374]
+    - [0.011381886, 0.999901889, -0.008164816, -0.005130029]
+    - [-0.011493331, 0.008295625, 0.999899538, -0.013873123]
+    - [0.0, 0.0, 0.0, 1.0]
   # Warm-start prior for tracker.py's _imu_bias_prior (see its own docstring): the bootstrap/
   # dynamic-init solve's starting guess for THIS unit, instead of an assumed-zero bias - the
   # online solve (dynamic bootstrap + periodic reinit/VIBA) still re-estimates from scratch

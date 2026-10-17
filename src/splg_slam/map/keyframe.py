@@ -18,3 +18,6 @@ class KeyFrame(Frame):
     # segments isn't backed by the same "already locally-accurate odometry" assumption a
     # same-segment relative pose is. See build_map.py's loop-closure consistency check.
     segment_id: int = 1
+    # Optional immutable depth-plane measurement in rectified cam0 coordinates.
+    # group_id associates overlapping observations, not a globally fixed floor Z.
+    ground_plane: dict | None = None

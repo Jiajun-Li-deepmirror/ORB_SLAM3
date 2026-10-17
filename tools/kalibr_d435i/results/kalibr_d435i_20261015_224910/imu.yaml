@@ -1,0 +1,13 @@
+# Kalibr IMU noise model for this D435i unit (topic produced by rosbag2_to_kalibr.py).
+# Measured Allan-variance values (splg_slam/data/rosbag_common.py, 14.3 h static recording,
+# 2026-09-23): gyro nd 1.831275e-04 rad/s/sqrt(Hz), gyro rw 2.158951e-06 rad/s^2/sqrt(Hz),
+# accel nd 8.570783e-04 m/s^2/sqrt(Hz), accel rw 2.403472e-05 m/s^3/sqrt(Hz).
+# Static Allan values understate in-motion noise (vibration, temperature, and here a 100 Hz
+# accel interpolated onto the 200 Hz gyro clock), so they are inflated: noise density x5,
+# random walk x10.
+rostopic: /imu0
+update_rate: 200.0
+accelerometer_noise_density: 4.2853915e-03
+accelerometer_random_walk: 2.403472e-04
+gyroscope_noise_density: 9.156375e-04
+gyroscope_random_walk: 2.158951e-05

@@ -1,0 +1,9 @@
+# This lab's printed AprilGrid: tag edge (black outer square) 55 mm, gap between
+# neighbouring tags 16.5 mm -> tagSpacing = 16.5 / 55 = 0.3.
+# tagCols/tagRows must match the printed board (count the tags); 6x6 assumed until
+# confirmed - run_kalibr.sh checks the detected tag IDs against this before calibrating.
+target_type: 'aprilgrid'
+tagCols: 6
+tagRows: 6
+tagSize: 0.055
+tagSpacing: 0.3

@@ -91,6 +91,47 @@ python scripts/build_map.py configs/realsense_current_stereo_imu.yaml \
 D435i (IMU time offset, gyro scale, accelerometer bias prior). The dated `realsense_*`
 configs point at specific earlier recordings.
 
+Optional observed ground-plane constraints are **off by default**. For a rosbag2
+stereo+IMU run with recorded rectified depth, set `ground_plane.enabled: true` in
+a copy of the config. This does not require changing `dataset.use_sensor_depth`:
+the visual front end continues using its existing stereo depth, while a bounded-memory
+reader uses sensor depth only for ground observations. The reader checks timestamps
+(20 ms maximum mismatch), image encoding, and depth-camera calibration/extrinsics.
+The default 16-bit depth scale is 0.001 m/unit; change `ground_plane.depth_scale`
+if the recording uses a different scale. Float depth images are interpreted in meters.
+
+Ground is extracted after IMU gravity initialization using deterministic RANSAC,
+with direction, camera-side, support-area and footprint-overlap checks. Measurements
+are kept in each keyframe's camera coordinates. Local BA, final BA and loop pose-graph
+optimization share robust normal/distance factors; each associated ground patch has
+its own optimized height and slope. Camera height is never clamped. Nonoverlapping
+patches, different elevations and unrelated Atlas segments are not automatically
+merged. Keyframe culling and gauge changes rebuild plane states from surviving
+observations, avoiding stale world-frame priors. The installed GTSAM 4.2 Python
+package has no plane bindings, so these factors use `CustomFactor` with tested
+analytic Jacobians.
+
+`ground_plane.distance_sigma_m` (default 0.06), `normal_sigma_deg` (3), and
+`gravity_sigma_deg` (5) control the soft observation and horizontal-ground priors.
+Remaining options are documented by `GroundPlaneOptions` in
+`src/splg_slam/mapping/ground_plane.py`. `ground_planes.jsonl` records accepted and
+rejected detections, timing, fit quality and associations beside the output map.
+This is a geometric ground detector: large tabletops can be ambiguous, ramps need
+separate validation, and there is no semantic floor classifier or absolute-height
+sensor. Unsupported or unseen ground contributes no constraint. Multi-floor behavior
+is covered by synthetic tests; real stairs/elevator recordings are still required
+before relying on it for multi-floor deployment. Validate XY shape, tracking failures
+and loop closures as well as Z; a flatter trajectory alone does not prove accuracy.
+
+The plane slope is a free variable, so these factors cannot remove a tilt of the whole
+map relative to gravity; on the RealSense recordings that tilt came mostly from the
+uncalibrated IMU-camera rotation. `realsense_current_stereo_imu.yaml` now carries a
+Kalibr-calibrated `imu.t_cam0_body_override` (calibration tools and results in
+`tools/kalibr_d435i/`). `ground_plane.normal_bias_deg` (default `[0, 0]`) removes a
+camera-fixed bias of the depth-measured floor normal; about `[0.45, 0]` was measured
+for this unit on level floors. Analysis, experiments and open issues:
+`docs/reports/2026-10-17_z_drift_ground_plane_kalibr/report.md`.
+
 This runs the full offline pipeline (tracking → local BA → loop closure → final global
 BA) and writes a pickled `WorldMap` (keyframes, map points, poses) under `output.map_dir`.
 

@@ -27,6 +27,7 @@ from splg_slam.mapping.gtsam_utils import (
     pose_cw_to_gtsam,
 )
 from splg_slam.mapping.imu_preintegration import bias_from_vector, preintegrate
+from splg_slam.mapping.ground_plane import add_ground_factors
 
 # gtsam.symbol_shorthand.Y isn't a builtin shorthand - build one for the IMU body pose,
 # kept distinct from X() (camera pose) since GenericStereoFactor3D has no body_P_sensor
@@ -235,6 +236,7 @@ def local_bundle_adjustment(
             "num_outliers_removed": 0, "initial_error": 0.0, "final_error": 0.0, "rejected": False,
         }
 
+    ground_stats = add_ground_factors(world_map, graph, initial, free_touched, fixed_touched)
     use_imu_factors = bool(imu_factors) and imu_params is not None and imu_calib is not None
     if not fixed_touched:
         # No frozen boundary geometry to anchor the gauge with - fall back to pinning the
@@ -330,6 +332,7 @@ def local_bundle_adjustment(
     )
     if max_shift > max_pose_shift_m:
         return {
+            **ground_stats,
             "num_keyframes": len(free_touched), "num_points": len(valid_obs),
             "num_skipped_cheirality": n_skipped_cheirality, "num_outliers_removed": 0,
             "initial_error": float(initial_error), "final_error": float(graph.error(result)),
@@ -387,6 +390,7 @@ def local_bundle_adjustment(
 
     return {
         "num_keyframes": len(free_touched),
+        **ground_stats,
         "num_points": len(valid_obs),
         "num_skipped_cheirality": n_skipped_cheirality,
         "num_outliers_removed": n_outliers_removed,

@@ -12,6 +12,7 @@ from splg_slam.mapping.gtsam_utils import (
     pose_cw_to_gtsam,
 )
 from splg_slam.mapping.imu_preintegration import rotation_aligning
+from splg_slam.mapping.ground_plane import add_ground_factors
 
 
 def relative_pose(pose_cw_a: np.ndarray, pose_cw_b: np.ndarray) -> np.ndarray:
@@ -224,6 +225,7 @@ def optimize_pose_graph(
     for seg_kf_ids in segment_groups.values():
         graph.add(PriorFactorPose3(X(seg_kf_ids[0]), initial.atPose3(X(seg_kf_ids[0])), prior_noise))
 
+    ground_stats = add_ground_factors(world_map, graph, initial, set(kf_ids), set())
     optimizer = gtsam.LevenbergMarquardtOptimizer(graph, initial, gtsam.LevenbergMarquardtParams())
     initial_error = graph.error(initial)
     result = optimizer.optimize()
@@ -235,6 +237,7 @@ def optimize_pose_graph(
     )
     if max_shift > max_pose_shift_m:
         return {
+            **ground_stats,
             "num_keyframes": len(kf_ids), "num_loop_edges": len(world_map.loop_edges),
             "initial_error": float(initial_error), "final_error": float(graph.error(result)),
             "rejected": True, "max_pose_shift_m": max_shift,
@@ -259,6 +262,7 @@ def optimize_pose_graph(
 
     return {
         "num_keyframes": len(kf_ids),
+        **ground_stats,
         "num_loop_edges": len(world_map.loop_edges),
         "initial_error": float(initial_error),
         "final_error": float(graph.error(result)),

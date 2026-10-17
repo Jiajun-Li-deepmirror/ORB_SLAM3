@@ -1,0 +1,80 @@
+kalibr_tol015/line_for {"keyframes": 153, "segments": 1, "z_range": 0.329, "z_end": 0.269, "tilt_deg": 0.384, "z_resid_range": 0.12, "floor_obs": 145, "floor_vs_up_pitch": 0.514, "floor_vs_up_roll": -0.39, "floor_z_range": 0.267}
+kalibr_ground_n05_bias_tol015/line_for {"keyframes": 155, "segments": 1, "z_range": 0.225, "z_end": 0.184, "tilt_deg": 0.219, "z_resid_range": 0.059, "floor_obs": 147, "floor_vs_up_pitch": 0.552, "floor_vs_up_roll": -0.755, "floor_z_range": 0.161}
+kalibr_tol015/line_for_2 {"keyframes": 84, "segments": 1, "z_range": 0.086, "z_end": 0.021, "tilt_deg": 0.008, "z_resid_range": 0.086, "floor_obs": 63, "floor_vs_up_pitch": 0.437, "floor_vs_up_roll": -0.271, "floor_z_range": 0.134}
+kalibr_ground_n05_bias_tol015/line_for_2 {"keyframes": 84, "segments": 1, "z_range": 0.086, "z_end": 0.019, "tilt_deg": 0.012, "z_resid_range": 0.085, "floor_obs": 64, "floor_vs_up_pitch": 0.491, "floor_vs_up_roll": -0.298, "floor_z_range": 0.195}
+kalibr_tol015/line_lat {"keyframes": 100, "segments": 1, "z_range": 0.519, "z_end": 0.495, "tilt_deg": 0.471, "z_resid_range": 0.116, "floor_obs": 96, "floor_vs_up_pitch": 0.794, "floor_vs_up_roll": 0.062, "floor_z_range": 0.479}
+kalibr_ground_n05_bias_tol015/line_lat {"keyframes": 115, "segments": 1, "z_range": 0.415, "z_end": 0.389, "tilt_deg": 0.382, "z_resid_range": 0.073, "floor_obs": 110, "floor_vs_up_pitch": 0.751, "floor_vs_up_roll": 0.038, "floor_z_range": 0.374}
+kalibr_tol015/cali_line_for {"keyframes": 127, "segments": 1, "z_range": 0.193, "z_end": 0.115, "tilt_deg": 0.152, "z_resid_range": 0.105, "floor_obs": 127, "floor_vs_up_pitch": 0.565, "floor_vs_up_roll": -0.08, "floor_z_range": 0.137}
+kalibr_ground_n05_bias_tol015/cali_line_for {"keyframes": 121, "segments": 1, "z_range": 0.153, "z_end": 0.089, "tilt_deg": 0.096, "z_resid_range": 0.09, "floor_obs": 119, "floor_vs_up_pitch": 0.542, "floor_vs_up_roll": 0.003, "floor_z_range": 0.079}
+kalibr_tol015/turn_for {"keyframes": 177, "segments": 1, "z_range": 0.169, "z_end": -0.096, "tilt_deg": 0.103, "z_resid_range": 0.183, "floor_obs": 137, "floor_vs_up_pitch": 0.606, "floor_vs_up_roll": 0.384, "floor_z_range": 0.156}
+kalibr_ground_n05_bias_tol015/turn_for {"keyframes": 175, "segments": 1, "z_range": 0.259, "z_end": -0.059, "tilt_deg": 0.558, "z_resid_range": 0.115, "floor_obs": 140, "floor_vs_up_pitch": 0.596, "floor_vs_up_roll": 0.329, "floor_z_range": 0.211}
+kalibr_tol015/loop_for {"keyframes": 336, "segments": 1, "z_range": 0.176, "z_end": 0.04, "tilt_deg": 0.106, "z_resid_range": 0.143, "floor_obs": 329, "floor_vs_up_pitch": 0.346, "floor_vs_up_roll": 0.341, "floor_z_range": 0.101}
+kalibr_ground_n05_bias_tol015/loop_for {"keyframes": 337, "segments": 1, "z_range": 0.154, "z_end": 0.064, "tilt_deg": 0.124, "z_resid_range": 0.142, "floor_obs": 334, "floor_vs_up_pitch": 0.37, "floor_vs_up_roll": 0.056, "floor_z_range": 0.11}
+kalibr_tol015/loop_for_2 {"keyframes": 218, "segments": 1, "z_range": 0.125, "z_end": 0.038, "tilt_deg": 0.283, "z_resid_range": 0.099, "floor_obs": 107, "floor_vs_up_pitch": 0.575, "floor_vs_up_roll": -0.224, "floor_z_range": 0.266}
+kalibr_ground_n05_bias_tol015/loop_for_2 {"keyframes": 223, "segments": 1, "z_range": 0.121, "z_end": 0.039, "tilt_deg": 0.27, "z_resid_range": 0.103, "floor_obs": 110, "floor_vs_up_pitch": 0.483, "floor_vs_up_roll": -0.075, "floor_z_range": 0.224}
+kalibr_tol015/loop_lat {"keyframes": 240, "segments": 1, "z_range": 0.265, "z_end": 0.092, "tilt_deg": 0.395, "z_resid_range": 0.148, "floor_obs": 235, "floor_vs_up_pitch": 0.365, "floor_vs_up_roll": 0.356, "floor_z_range": 0.234}
+kalibr_ground_n05_bias_tol015/loop_lat {"keyframes": 252, "segments": 1, "z_range": 0.24, "z_end": 0.177, "tilt_deg": 0.571, "z_resid_range": 0.085, "floor_obs": 238, "floor_vs_up_pitch": 0.296, "floor_vs_up_roll": 0.385, "floor_z_range": 0.199}
+kalibr_tol015/cali_loop_for {"keyframes": 288, "segments": 1, "z_range": 0.305, "z_end": 0.119, "tilt_deg": 0.418, "z_resid_range": 0.244, "floor_obs": 283, "floor_vs_up_pitch": 0.528, "floor_vs_up_roll": 0.198, "floor_z_range": 0.256}
+kalibr_ground_n05_bias_tol015/cali_loop_for {"keyframes": 306, "segments": 1, "z_range": 0.337, "z_end": 0.012, "tilt_deg": 0.359, "z_resid_range": 0.118, "floor_obs": 300, "floor_vs_up_pitch": 0.393, "floor_vs_up_roll": -0.015, "floor_z_range": 0.238}
+
+dataset        variant       z_range   z_end   tilt  floor-up pitch/roll floor_z segs
+line_for       baseline        0.657  +0.619  0.67°     +0.93°   +0.28°   0.529    1
+line_for       kalibr          0.316  +0.169  0.08°     +0.41°   -0.39°   0.221    1
+line_for       kalibr_ground   0.208  +0.166  0.20°     +0.43°   -0.41°   0.151    1
+line_for       kalibr_ground_n05   0.271  -0.255  0.28°     +0.01°   -0.56°   0.255    1
+line_for       kalibr_ground_n05_d02   0.217  +0.172  0.24°     +0.45°   -0.36°   0.165    1
+line_for       kalibr_ground_n05_bias   0.199  +0.144  0.16°     +0.50°   -0.80°   0.127    1
+line_for       kalibr_tol015   0.329  +0.269  0.38°     +0.51°   -0.39°   0.267    1
+line_for       kalibr_ground_n05_bias_tol015   0.225  +0.184  0.22°     +0.55°   -0.76°   0.161    1
+line_for_2     baseline        0.241  +0.197  0.51°     +1.01°   +0.33°   0.278    1
+line_for_2     kalibr          0.085  +0.031  0.03°     +0.47°   -0.16°   0.137    1
+line_for_2     kalibr_ground   0.082  +0.017  0.02°     +0.43°   -0.37°   0.164    1
+line_for_2     kalibr_ground_n05_bias   0.395  -0.389  1.12°     -0.62°   +0.01°   0.378    1
+line_for_2     kalibr_tol015   0.086  +0.021  0.01°     +0.44°   -0.27°   0.134    1
+line_for_2     kalibr_ground_n05_bias_tol015   0.086  +0.019  0.01°     +0.49°   -0.30°   0.195    1
+line_lat       baseline        0.249  -0.187  0.22°     +1.15°   +0.68°   0.206    1
+line_lat       kalibr          0.409  +0.346  0.41°     +0.84°   +0.06°   0.374    1
+line_lat       kalibr_ground   0.433  +0.407  0.43°     +0.61°   +0.07°   0.396    1
+line_lat       kalibr_ground_n05   0.323  +0.289  0.29°     +0.79°   +0.14°   0.286    1
+line_lat       kalibr_ground_n05_d02   0.286  +0.258  0.26°     +0.72°   +0.17°   0.253    1
+line_lat       kalibr_ground_n05_bias   0.296  +0.259  0.26°     +0.77°   +0.17°   0.258    1
+line_lat       kalibr_tol015   0.519  +0.495  0.47°     +0.79°   +0.06°   0.479    1
+line_lat       kalibr_ground_n05_bias_tol015   0.415  +0.389  0.38°     +0.75°   +0.04°   0.374    1
+cali_line_for  baseline        0.471  +0.416  0.47°     +0.90°   +0.40°   0.315    1
+cali_line_for  kalibr          0.171  -0.000  0.04°     +0.35°   -0.14°   0.153    1
+cali_line_for  kalibr_ground   0.136  +0.070  0.06°     +0.52°   -0.11°   0.057    1
+cali_line_for  kalibr_ground_n05_bias   0.101  +0.040  0.03°     +0.53°   -0.03°   0.057    1
+cali_line_for  kalibr_tol015   0.193  +0.115  0.15°     +0.56°   -0.08°   0.137    1
+cali_line_for  kalibr_ground_n05_bias_tol015   0.153  +0.089  0.10°     +0.54°   +0.00°   0.079    1
+turn_for       baseline        0.160  -0.031  0.17°     +0.68°   +0.38°   0.177    1
+turn_for       kalibr          0.169  -0.096  0.10°     +0.61°   +0.38°   0.156    1
+turn_for       kalibr_ground   0.228  -0.009  0.50°     +0.49°   +0.43°   0.200    1
+turn_for       kalibr_ground_n05_bias   0.259  -0.059  0.56°     +0.60°   +0.33°   0.211    1
+turn_for       kalibr_tol015   0.169  -0.096  0.10°     +0.61°   +0.38°   0.156    1
+turn_for       kalibr_ground_n05_bias_tol015   0.259  -0.059  0.56°     +0.60°   +0.33°   0.211    1
+loop_for       baseline        0.244  +0.044  0.14°     +0.39°   +0.20°   0.152    1
+loop_for       kalibr          0.231  -0.024  0.10°     +0.40°   +0.20°   0.123    1
+loop_for       kalibr_ground   0.161  -0.016  0.11°     +0.32°   +0.17°   0.102    1
+loop_for       kalibr_ground_n05_bias   0.160  +0.053  0.13°     +0.39°   +0.05°   0.102    1
+loop_for       kalibr_tol015   0.176  +0.040  0.11°     +0.35°   +0.34°   0.101    1
+loop_for       kalibr_ground_n05_bias_tol015   0.154  +0.064  0.12°     +0.37°   +0.06°   0.110    1
+loop_for_2     baseline        0.113  +0.082  0.16°     +0.73°   -0.18°   0.232    1
+loop_for_2     kalibr          0.125  +0.038  0.28°     +0.58°   -0.22°   0.266    1
+loop_for_2     kalibr_ground   0.097  +0.053  0.09°     +0.61°   -0.14°   0.223    1
+loop_for_2     kalibr_ground_n05_bias   0.106  +0.034  0.10°     +0.70°   -0.04°   0.197    1
+loop_for_2     kalibr_tol015   0.125  +0.038  0.28°     +0.58°   -0.22°   0.266    1
+loop_for_2     kalibr_ground_n05_bias_tol015   0.121  +0.039  0.27°     +0.48°   -0.07°   0.224    1
+loop_lat       baseline        0.251  +0.066  0.37°     +0.23°   +0.41°   0.212    1
+loop_lat       kalibr          0.233  +0.048  0.38°     +0.34°   +0.40°   0.196    1
+loop_lat       kalibr_ground   0.473  +0.088  0.53°     +0.29°   +0.34°   0.417    1
+loop_lat       kalibr_ground_n05   0.175  +0.096  0.31°     +0.09°   +0.38°   0.141    1
+loop_lat       kalibr_ground_n05_d02   0.255  +0.163  0.54°     +0.10°   +0.38°   0.206    1
+loop_lat       kalibr_ground_n05_bias   0.308  +0.196  0.52°     +0.25°   +0.31°   0.227    1
+loop_lat       kalibr_tol015   0.265  +0.092  0.40°     +0.37°   +0.36°   0.234    1
+loop_lat       kalibr_ground_n05_bias_tol015   0.240  +0.177  0.57°     +0.30°   +0.39°   0.199    1
+cali_loop_for  baseline        0.328  +0.144  0.28°     +0.58°   +0.10°   0.268    1
+cali_loop_for  kalibr          0.307  +0.156  0.40°     +0.58°   +0.12°   0.260    1
+cali_loop_for  kalibr_ground   0.222  +0.097  0.19°     +0.33°   +0.15°   0.175    1
+cali_loop_for  kalibr_ground_n05_bias   0.181  +0.126  0.20°     +0.43°   +0.09°   0.134    1
+cali_loop_for  kalibr_tol015   0.305  +0.119  0.42°     +0.53°   +0.20°   0.256    1
+cali_loop_for  kalibr_ground_n05_bias_tol015   0.337  +0.012  0.36°     +0.39°   -0.01°   0.238    1

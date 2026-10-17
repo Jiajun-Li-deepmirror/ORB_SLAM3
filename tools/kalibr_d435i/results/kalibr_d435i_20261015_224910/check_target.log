@@ -1,0 +1,31 @@
+673 sampled frames, 666 with tags, 662 with >=8 tags; IDs 0..35 (36 distinct)
+grid residual by column count: 3:98.0px, 4:103.4px, 5:99.5px, 6:0.0px, 7:95.7px, 8:99.6px, 9:96.4px, 10:100.6px, 11:95.6px, 12:74.5px
+tagSpacing measured 0.300, configured 0.3
+
+  block s tags/frame frames>=8 tags   gyro rms x/y/z deg/s
+   0-3            36           100%             [0. 0. 0.]
+   3-6            36           100%             [0. 0. 0.]
+   6-9            36           100%             [0. 0. 0.]
+   9-12           36           100%             [0. 0. 0.]
+  12-15           36           100%             [0. 0. 0.]
+  15-18           36           100%             [0. 0. 0.]
+  18-21           34            97%          [ 7. 23.  5.]
+  21-24           36           100%          [ 8. 26.  8.]
+  24-27           36           100%          [ 7. 19.  8.]
+  27-30           36           100%          [12. 26. 10.]
+  30-33           30           100%          [19.  7.  4.]
+  33-36           30            93%          [ 9. 16.  9.]
+  36-39           30            97%          [11. 12. 22.]
+  39-42           30            90%          [19. 13. 14.]
+  42-45           30            93%             [9. 8. 6.]
+  45-48           36            97%             [9. 9. 5.]
+  48-51           36           100%          [10.  8.  4.]
+  51-54           36            97%             [7. 5. 2.]
+  54-57           36           100%             [0. 0. 0.]
+  57-60           36           100%             [0. 0. 0.]
+  60-63           36           100%             [0. 0. 0.]
+  63-66           36           100%             [0. 0. 0.]
+  66-69           36           100%             [0. 0. 0.]
+
+moving time with board visible: 36 s; moving but blind: 0 s; longest gap without detections: 0 s; overall gyro rms [ 8. 12.  7.] deg/s
+OK: target config consistent and recording usable

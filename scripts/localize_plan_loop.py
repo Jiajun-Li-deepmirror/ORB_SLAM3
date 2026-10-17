@@ -44,6 +44,9 @@ def load_imu_for_localizer(cfg, dmod, ddir: Path):
         return None, None, None
     tf_kwargs = {"tf_static_from": cfg.dataset.tf_static_from} if getattr(cfg.dataset, "tf_static_from", None) else {}
     imu_calib = dmod.load_imu_calibration(ddir, **tf_kwargs)
+    if getattr(cfg.imu, "t_cam0_body_override", None) is not None:
+        # Same override build_map.py applies: the map's poses were optimized with it.
+        imu_calib.T_cam0_body = np.array(cfg.imu.t_cam0_body_override, dtype=np.float64)
     imu_measurements = dmod.load_imu_measurements(ddir)
     imu_params = make_preintegration_params(imu_calib, cfg.imu.gravity_norm, cfg.imu.integration_sigma,
                                       bias_init_covariance=getattr(cfg.imu, "bias_init_covariance", None))

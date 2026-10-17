@@ -1,5 +1,6 @@
 import argparse
 import itertools
+import json
 import os
 import sys
 import time
@@ -27,6 +28,7 @@ from splg_slam.mapping.imu_preintegration import (
     preintegrate,
 )
 from splg_slam.mapping.local_ba import local_bundle_adjustment
+from splg_slam.mapping.ground_plane import GroundPlaneOptions, associate_ground, detect_ground
 from splg_slam.mapping.loop_closure import (
     LoopConsistencyTracker,
     detect_loop_candidates,
@@ -363,6 +365,9 @@ def main():
     )
 
     imu_enabled = bool(getattr(cfg, "imu", None) and cfg.imu.enabled)
+    ground_options = GroundPlaneOptions.from_config(getattr(cfg, "ground_plane", None))
+    if ground_options.enabled and (not imu_enabled or mono_mode or getattr(cfg.dataset, "kind", "euroc") != "rosbag2"):
+        raise ValueError("ground_plane currently requires rosbag2 stereo input with IMU gravity alignment")
     imu_calib = dmod.load_imu_calibration(ddir, **tf_kwargs) if imu_enabled and hasattr(dmod, "load_imu_calibration") else None
     if imu_calib is not None and getattr(cfg.imu, "t_cam0_body_override", None) is not None:
         # DIAGNOSTIC: override just the IMU->camera extrinsic (not the whole /tf_static
@@ -558,6 +563,14 @@ def main():
         imu_measurements=imu_measurements, imu_calib=imu_calib,
         depth_lookup=depth_lookup, mono_mode=mono_mode,
     )
+    ground_reader = None
+    if ground_options.enabled:
+        from splg_slam.data.ground_depth import GroundDepthReader
+        ground_reader = GroundDepthReader(ddir, rectifier, ground_options, **tf_kwargs)
+        mapper.world_map.ground_plane_options = ground_options
+        # Starting a fresh build overwrites its diagnostic stream, just like map.pkl.
+        (output_dir / "ground_planes.jsonl").write_text("")
+        print("Ground planes enabled: measured depth planes, independent patch heights, robust BA/loop factors")
     # Instead of a hand-picked list of keyframe counts, keep checking periodically over a
     # SLIDING window of the most recent reinit_window_kf keyframes (not the segment's whole
     # history - see run_periodic_imu_reinit and this call's comment below for why a growing,
@@ -1085,6 +1098,23 @@ def main():
                             f"axis_diversity={diag['rotation_axis_diversity']:.3f})"
                         )
 
+                if ground_reader is not None:
+                    ground_diag = {"keyframe_id": int(result.frame_id), "timestamp_ns": int(e.timestamp_ns)}
+                    if mapper.imu_init_pending or getattr(result, "imu_only", False):
+                        ground_diag["reason"] = "imu_init_pending" if mapper.imu_init_pending else "imu_only_pose"
+                    else:
+                        ground_points, depth_diag = ground_reader.points_at(e.timestamp_ns)
+                        ground_diag.update(depth_diag)
+                        if ground_points is not None:
+                            up_camera = result.pose_cw[:3, :3] @ np.array([0., 0., 1.])
+                            observation, detection_diag = detect_ground(
+                                ground_points, up_camera, ground_options, seed=int(result.frame_id))
+                            ground_diag.update(detection_diag)
+                            if observation is not None:
+                                ground_diag.update(associate_ground(mapper.world_map, result, observation, ground_options))
+                    with (output_dir / "ground_planes.jsonl").open("a") as stream:
+                        stream.write(json.dumps(ground_diag, allow_nan=False) + "\n")
+
                 backend_updated = just_reinitialized
                 if (cfg.mapping.periodic_local_ba_enabled and n_keyframes % cfg.mapping.local_ba_every_n_kf == 0
                     and not (just_reinitialized and refine_after_init)):
@@ -1217,6 +1247,9 @@ def main():
                 f"map_points={len(mapper.world_map.map_points)} lost={n_lost} loops={n_loops} "
                 f"reloc={mapper.n_relocalizations} ({fps:.1f} fps)"
             )
+
+    if ground_reader is not None:
+        ground_reader.close()
 
     if loop_enabled and n_keyframes > 0:
         # One extra check against the very last keyframe, bypassing loop_consistency's
@@ -1626,6 +1659,9 @@ def main():
             f"{len(mapper.world_map.loop_edges)} loop edges, {stats['num_outliers_removed']} outlier obs removed): "
             f"error {stats['initial_error']:.1f} -> {stats['final_error']:.1f} ({time.monotonic() - t0:.1f}s)"
         )
+        if ground_options.enabled:
+            print(f"  ground factors: {stats.get('ground_plane_factors', 0)} observations, "
+                  f"{stats.get('ground_plane_groups', 0)} independent patches; rejected={stats['rejected']}")
 
     # Vision-only, IMU-free vertical-axis fallback (see pose_graph.estimate_vertical_axis_pca's
     # own docstring for the full rationale/caveats) - only relevant when there's no IMU-based

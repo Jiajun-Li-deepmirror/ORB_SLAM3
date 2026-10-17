@@ -4,3 +4,5 @@ results/
 __pycache__/
 *.pyc
 *.pkl
+tools/kalibr_d435i/runs/
+!tools/kalibr_d435i/results/

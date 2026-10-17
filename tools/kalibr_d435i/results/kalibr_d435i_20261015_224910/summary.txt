@@ -1,0 +1,15 @@
+Kalibr T_cam0_imu:
+ [[ 0.999869 -0.011287  0.011587  0.00579 ]
+ [ 0.011382  0.999902 -0.008165 -0.00513 ]
+ [-0.011493  0.008296  0.9999   -0.013873]
+ [ 0.        0.        0.        1.      ]]
+rotation vs tf_static (identity): 1.040 deg, rotvec in cam0 [x(pitch), y(yaw about vertical), z(roll)] = [0.472, 0.661, 0.649] deg
+translation vs tf_static: [0.27, -0.03, -2.13] mm
+timeshift t_imu = t_cam + -4.98 ms for this recording's exposure (not exported: the offset moves by about -exposure/2; configs use time_offset_ms: 8.0)
+For reference, the floor-normal vs accelerometer offset measured from the SLAM datasets was about [1.23, -, 0.76] deg (x, -, z).
+stereo baseline: kalibr 50.31 mm vs factory 50.31 mm
+cam0 intrinsics kalibr [432.4, 432.4, 421.43, 238.09] vs factory [432.4, 432.4, 421.43, 238.09], distortion [0.0, 0.0, 0.0, 0.0]
+cam1 intrinsics kalibr [432.4, 432.4, 421.43, 238.09] vs factory [432.4, 432.4, 421.43, 238.09], distortion [0.0, 0.0, 0.0, 0.0]
+wrote runs/kalibr_d435i_20261015_224910/splg_imu_override.yaml
+see runs/kalibr_d435i_20261015_224910/kalibr-results-imucam.txt
+see runs/kalibr_d435i_20261015_224910/kalibr-report-imucam.pdf
